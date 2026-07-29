@@ -7,7 +7,10 @@ import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.os.SystemClock
+import android.provider.Settings
+import android.service.notification.NotificationListenerService
 import com.heartline.app.data.DetectedTrack
+import com.heartline.app.data.ListenerConnection
 import com.heartline.app.data.LyricCandidate
 import com.heartline.app.data.PlaybackMode
 import com.heartline.app.data.PlayerState
@@ -47,6 +50,8 @@ object MediaSessionRepository {
     private var sourceLockPackage: String? = null
     private var lookupJob: Job? = null
     private var tickerJob: Job? = null
+    private var watchdogJob: Job? = null
+    private var reconnectJob: Job? = null
     private var preferredPackage: String? = null
     private var manualBasePositionMs = 0L
     private var manualBaseElapsedMs = 0L
@@ -56,46 +61,198 @@ object MediaSessionRepository {
         manager = context.getSystemService(MediaSessionManager::class.java)
         lyricsRepository = lyrics
         dao = trackDao
-        val component = ComponentName(context, HeartlineNotificationListener::class.java)
-        runCatching { manager.addOnActiveSessionsChangedListener({ updateControllers(it ?: emptyList()) }, component) }
+        val component = listenerComponent()
+        runCatching {
+            manager.addOnActiveSessionsChangedListener({ updateControllers(it ?: emptyList()) }, component)
+        }
         scope.launch {
             settings.settings.collect { config ->
                 preferredPackage = config.preferredSourcePackage
                 _state.update { it.copy(globalOffsetMs = config.globalOffsetMs) }
             }
         }
+        _state.update { it.copy(listenerConnection = ListenerConnection.CONNECTING) }
         refreshSessions()
         startTicker()
+        startWatchdog()
+    }
+
+    fun onListenerConnected() {
+        reconnectJob?.cancel()
+        _state.update {
+            it.copy(
+                listenerConnection = ListenerConnection.CONNECTED,
+                reconnectAttempts = 0,
+                lastMediaEventElapsedMs = SystemClock.elapsedRealtime()
+            )
+        }
+        refreshSessions()
+    }
+
+    fun onListenerDisconnected() {
+        _state.update { it.copy(listenerConnection = ListenerConnection.DISCONNECTED) }
+        requestAutomaticReconnect("Android disconnected music access")
+    }
+
+    fun onAppForegrounded() {
+        if (!hasNotificationAccess()) {
+            markPermissionMissing()
+            return
+        }
+        _state.update { it.copy(listenerConnection = ListenerConnection.CONNECTING) }
+        requestSystemRebind()
+        refreshSessions()
+        scope.launch {
+            delay(350)
+            refreshSessions()
+            chooseActive(forceRebind = true)
+        }
     }
 
     fun refreshSessions() {
         if (!::manager.isInitialized) return
-        val component = ComponentName(context, HeartlineNotificationListener::class.java)
-        runCatching { manager.getActiveSessions(component) }.onSuccess(::updateControllers).onFailure { markPermissionMissing() }
+        if (!hasNotificationAccess()) {
+            markPermissionMissing()
+            return
+        }
+        val result = runCatching { manager.getActiveSessions(listenerComponent()) }
+        result.onSuccess { list ->
+            _state.update {
+                it.copy(
+                    listenerConnection = ListenerConnection.CONNECTED,
+                    lastMediaEventElapsedMs = SystemClock.elapsedRealtime()
+                )
+            }
+            updateControllers(list)
+        }.onFailure {
+            _state.update { state -> state.copy(listenerConnection = ListenerConnection.DISCONNECTED) }
+            requestAutomaticReconnect("Reconnecting to music…")
+        }
     }
 
     fun reconnect() {
-        active = null
-        refreshSessions()
-        scope.launch { delay(150); chooseActive(forceRebind = true) }
+        requestAutomaticReconnect("Reconnecting to music…", immediate = true)
+    }
+
+    fun diagnosticsReport(): String {
+        val s = _state.value
+        val lastAgo = if (s.lastMediaEventElapsedMs > 0) {
+            ((SystemClock.elapsedRealtime() - s.lastMediaEventElapsedMs).coerceAtLeast(0) / 1000).toString() + "s ago"
+        } else "never"
+        return buildString {
+            appendLine("HEARTLINE connection diagnostics")
+            appendLine("Notification access: ${if (hasNotificationAccess()) "Granted" else "Not granted"}")
+            appendLine("Listener: ${s.listenerConnection}")
+            appendLine("Active sessions: ${s.activeSessionCount}")
+            appendLine("Selected source: ${s.track?.sourceLabel ?: "None"}")
+            appendLine("Metadata: ${if (s.track != null) "Available" else "Unavailable"}")
+            appendLine("Last media event: $lastAgo")
+            appendLine("Reconnect attempts: ${s.reconnectAttempts}")
+            appendLine("Status: ${s.status}")
+        }
     }
 
     fun markPermissionMissing() {
         active = null
-        _state.update { it.copy(status = PlayerStatus.PermissionRequired, message = "Enable music access to detect playback") }
+        clearControllers()
+        _state.update {
+            it.copy(
+                track = null,
+                lyrics = emptyList(),
+                plainLyrics = null,
+                currentLineIndex = -1,
+                displayPositionMs = 0,
+                activeSessionCount = 0,
+                listenerConnection = ListenerConnection.PERMISSION_REQUIRED,
+                status = PlayerStatus.PermissionRequired,
+                message = "Enable music access to detect playback"
+            )
+        }
     }
+
+    private fun requestAutomaticReconnect(reason: String, immediate: Boolean = false) {
+        if (!hasNotificationAccess()) {
+            markPermissionMissing()
+            return
+        }
+        if (reconnectJob?.isActive == true) return
+        reconnectJob = scope.launch {
+            val startingAttempt = _state.value.reconnectAttempts
+            for (step in 0 until MAX_RECONNECT_ATTEMPTS) {
+                val attempt = startingAttempt + step + 1
+                val waitMs = if (immediate && step == 0) 0L else RECONNECT_DELAYS_MS[step.coerceAtMost(RECONNECT_DELAYS_MS.lastIndex)]
+                _state.update {
+                    it.copy(
+                        listenerConnection = ListenerConnection.CONNECTING,
+                        reconnectAttempts = attempt,
+                        lastReconnectElapsedMs = SystemClock.elapsedRealtime(),
+                        message = reason
+                    )
+                }
+                delay(waitMs)
+                requestSystemRebind()
+                active = null
+                refreshSessions()
+                delay(400)
+                chooseActive(forceRebind = true)
+                if (_state.value.listenerConnection == ListenerConnection.CONNECTED && controllers.isNotEmpty()) return@launch
+            }
+            _state.update {
+                it.copy(
+                    listenerConnection = ListenerConnection.DISCONNECTED,
+                    status = PlayerStatus.Waiting,
+                    message = "Could not reconnect automatically — tap Reconnect"
+                )
+            }
+        }
+    }
+
+    private fun requestSystemRebind() {
+        runCatching { NotificationListenerService.requestRebind(listenerComponent()) }
+    }
+
+    private fun hasNotificationAccess(): Boolean {
+        if (!::context.isInitialized) return false
+        val enabled = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners").orEmpty()
+        return enabled.split(':').any { ComponentName.unflattenFromString(it) == listenerComponent() }
+    }
+
+    private fun listenerComponent() = ComponentName(context, HeartlineNotificationListener::class.java)
 
     private fun updateControllers(list: List<MediaController>) {
         controllers.forEach { runCatching { it.unregisterCallback(callback) } }
         controllers = list.distinctBy { it.sessionToken }
         controllers.forEach { runCatching { it.registerCallback(callback) } }
+        _state.update {
+            it.copy(
+                listenerConnection = ListenerConnection.CONNECTED,
+                activeSessionCount = controllers.size,
+                lastMediaEventElapsedMs = SystemClock.elapsedRealtime(),
+                reconnectAttempts = 0
+            )
+        }
         chooseActive()
     }
 
+    private fun clearControllers() {
+        controllers.forEach { runCatching { it.unregisterCallback(callback) } }
+        controllers = emptyList()
+    }
+
     private val callback = object : MediaController.Callback() {
-        override fun onMetadataChanged(metadata: MediaMetadata?) = chooseActive()
-        override fun onPlaybackStateChanged(state: PlaybackState?) = chooseActive()
-        override fun onSessionDestroyed() = reconnect()
+        override fun onMetadataChanged(metadata: MediaMetadata?) {
+            _state.update { it.copy(lastMediaEventElapsedMs = SystemClock.elapsedRealtime()) }
+            chooseActive()
+        }
+
+        override fun onPlaybackStateChanged(state: PlaybackState?) {
+            _state.update { it.copy(lastMediaEventElapsedMs = SystemClock.elapsedRealtime()) }
+            chooseActive()
+        }
+
+        override fun onSessionDestroyed() {
+            requestAutomaticReconnect("Music session changed — reconnecting", immediate = true)
+        }
     }
 
     private fun chooseActive(forceRebind: Boolean = false) {
@@ -105,12 +262,28 @@ object MediaSessionRepository {
         if (best == null) {
             active = null
             _state.update { current ->
-                current.copy(
-                    track = if (current.playbackMode == PlaybackMode.SEARCH) current.track else null,
-                    status = PlayerStatus.Waiting,
-                    message = if (locked == null) "Play something and HEARTLINE will find it" else "Locked source is unavailable",
-                    sourceLocked = locked != null
-                )
+                if (current.playbackMode == PlaybackMode.SEARCH) {
+                    current.copy(
+                        status = PlayerStatus.Waiting,
+                        message = if (locked == null) "Play something and HEARTLINE will find it" else "Locked source is unavailable",
+                        sourceLocked = locked != null,
+                        activeSessionCount = controllers.size
+                    )
+                } else {
+                    current.copy(
+                        track = null,
+                        lyrics = emptyList(),
+                        plainLyrics = null,
+                        currentLineIndex = -1,
+                        displayPositionMs = 0,
+                        isFavourite = false,
+                        isOfflineReady = false,
+                        status = PlayerStatus.Waiting,
+                        message = if (locked == null) "Play something and HEARTLINE will find it" else "Locked source is unavailable",
+                        sourceLocked = locked != null,
+                        activeSessionCount = controllers.size
+                    )
+                }
             }
             return
         }
@@ -122,6 +295,8 @@ object MediaSessionRepository {
         _state.update {
             it.copy(
                 track = detected,
+                listenerConnection = ListenerConnection.CONNECTED,
+                lastMediaEventElapsedMs = SystemClock.elapsedRealtime(),
                 status = if (oldFingerprint == detected.fingerprint && (it.lyrics.isNotEmpty() || !it.plainLyrics.isNullOrBlank())) it.status else PlayerStatus.Detecting,
                 sourceLocked = locked != null
             )
@@ -158,6 +333,11 @@ object MediaSessionRepository {
         val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM)?.trim()?.takeIf(String::isNotBlank)
         val duration = max(0, metadata.getLong(MediaMetadata.METADATA_KEY_DURATION))
         val playback = controller.playbackState
+        val artworkUri = sequenceOf(
+            MediaMetadata.METADATA_KEY_ALBUM_ART_URI,
+            MediaMetadata.METADATA_KEY_ART_URI,
+            MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI
+        ).mapNotNull { metadata.getString(it)?.trim()?.takeIf(String::isNotBlank) }.firstOrNull()
         val appLabel = runCatching {
             val info = context.packageManager.getApplicationInfo(controller.packageName, 0)
             context.packageManager.getApplicationLabel(info).toString()
@@ -173,7 +353,7 @@ object MediaSessionRepository {
             isPlaying = playback?.state == PlaybackState.STATE_PLAYING,
             sourcePackage = controller.packageName,
             sourceLabel = appLabel,
-            artworkUri = null,
+            artworkUri = artworkUri,
             updatedAtElapsedMs = playback?.lastPositionUpdateTime ?: SystemClock.elapsedRealtime()
         )
     }
@@ -259,16 +439,31 @@ object MediaSessionRepository {
         }
     }
 
+    private fun startWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = scope.launch {
+            while (isActive) {
+                delay(WATCHDOG_INTERVAL_MS)
+                val current = _state.value
+                if (current.playbackMode == PlaybackMode.AUTO && hasNotificationAccess()) {
+                    val stale = current.lastMediaEventElapsedMs > 0 && SystemClock.elapsedRealtime() - current.lastMediaEventElapsedMs > STALE_EVENT_MS
+                    if (current.listenerConnection != ListenerConnection.CONNECTED || stale || (controllers.isEmpty() && current.track != null)) {
+                        requestAutomaticReconnect("Refreshing music connection…")
+                    } else {
+                        refreshSessions()
+                    }
+                }
+            }
+        }
+    }
+
     fun transportPlayPause() {
         when (_state.value.playbackMode) {
             PlaybackMode.AUTO -> active?.transportControls?.let { if (_state.value.track?.isPlaying == true) it.pause() else it.play() }
             PlaybackMode.MANUAL, PlaybackMode.SEARCH -> {
                 val current = _state.value
-                if (current.manualClockPlaying) {
-                    manualBasePositionMs = current.displayPositionMs - current.globalOffsetMs - current.perTrackOffsetMs
-                } else {
-                    manualBaseElapsedMs = SystemClock.elapsedRealtime()
-                }
+                if (current.manualClockPlaying) manualBasePositionMs = current.displayPositionMs - current.globalOffsetMs - current.perTrackOffsetMs
+                else manualBaseElapsedMs = SystemClock.elapsedRealtime()
                 _state.update { it.copy(manualClockPlaying = !current.manualClockPlaying) }
             }
         }
@@ -323,4 +518,8 @@ object MediaSessionRepository {
     }
 
     private const val SWITCH_MARGIN = 35
+    private const val MAX_RECONNECT_ATTEMPTS = 5
+    private const val WATCHDOG_INTERVAL_MS = 15_000L
+    private const val STALE_EVENT_MS = 45_000L
+    private val RECONNECT_DELAYS_MS = longArrayOf(0, 500, 1_500, 3_000, 6_000)
 }
