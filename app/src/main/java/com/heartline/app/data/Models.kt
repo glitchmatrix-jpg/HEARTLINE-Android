@@ -42,6 +42,7 @@ data class DetectedTrack(
 )
 
 enum class PlaybackMode { AUTO, MANUAL, SEARCH }
+enum class ListenerConnection { UNKNOWN, CONNECTING, CONNECTED, DISCONNECTED, PERMISSION_REQUIRED }
 
 data class LyricCandidate(
     val id: Long,
@@ -76,7 +77,12 @@ data class PlayerState(
     val candidates: List<LyricCandidate> = emptyList(),
     val candidatesVisible: Boolean = false,
     val searchQuery: String = "",
-    val selectedProviderId: Long? = null
+    val selectedProviderId: Long? = null,
+    val listenerConnection: ListenerConnection = ListenerConnection.UNKNOWN,
+    val activeSessionCount: Int = 0,
+    val lastMediaEventElapsedMs: Long = 0,
+    val reconnectAttempts: Int = 0,
+    val lastReconnectElapsedMs: Long = 0
 )
 
 enum class PlayerStatus { Waiting, PermissionRequired, Detecting, LoadingLyrics, Ready, PlainLyrics, Instrumental, NoLyrics, Offline, Error }
