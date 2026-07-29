@@ -12,6 +12,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.heartline.app.media.HeartlineNotificationListener
+import com.heartline.app.media.MediaSessionRepository
 import com.heartline.app.service.LyricsForegroundService
 import com.heartline.app.ui.HeartlineV22App
 
@@ -37,6 +39,17 @@ class MainActivity : ComponentActivity() {
                 enterFocusMode = ::hideAllSystemBars
             )
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        HeartlineNotificationListener.requestReconnect(applicationContext)
+        MediaSessionRepository.reconnect()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        MediaSessionRepository.refreshSessions()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
