@@ -41,6 +41,22 @@ data class DetectedTrack(
     val updatedAtElapsedMs: Long
 )
 
+enum class PlaybackMode { AUTO, MANUAL, SEARCH }
+
+data class LyricCandidate(
+    val id: Long,
+    val title: String,
+    val artist: String,
+    val album: String?,
+    val durationSeconds: Double?,
+    val synced: Boolean,
+    val instrumental: Boolean,
+    val score: Double,
+    val preview: String,
+    val syncedLyrics: String?,
+    val plainLyrics: String?
+)
+
 data class PlayerState(
     val track: DetectedTrack? = null,
     val lyrics: List<LyricLine> = emptyList(),
@@ -54,7 +70,13 @@ data class PlayerState(
     val perTrackOffsetMs: Long = 0,
     val isFavourite: Boolean = false,
     val isOfflineReady: Boolean = false,
-    val sourceLocked: Boolean = false
+    val sourceLocked: Boolean = false,
+    val playbackMode: PlaybackMode = PlaybackMode.AUTO,
+    val manualClockPlaying: Boolean = true,
+    val candidates: List<LyricCandidate> = emptyList(),
+    val candidatesVisible: Boolean = false,
+    val searchQuery: String = "",
+    val selectedProviderId: Long? = null
 )
 
 enum class PlayerStatus { Waiting, PermissionRequired, Detecting, LoadingLyrics, Ready, PlainLyrics, Instrumental, NoLyrics, Offline, Error }
