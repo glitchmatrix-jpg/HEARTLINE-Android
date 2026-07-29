@@ -67,7 +67,7 @@ private fun PlayerScreen(state: PlayerState, modifier: Modifier, openNotificatio
                 Text("MUSIC ACCESS NEEDED", fontWeight = FontWeight.Black)
                 Text("HEARTLINE reads media metadata. It never records audio or uses your microphone.")
                 Spacer(Modifier.height(8.dp))
-                PixelButton("ENABLE MUSIC ACCESS", openNotificationAccess)
+                PixelButton("ENABLE MUSIC ACCESS", onClick = openNotificationAccess)
             }
         }
 
@@ -109,7 +109,7 @@ private fun PlayerScreen(state: PlayerState, modifier: Modifier, openNotificatio
             PixelButton("+0.5") { MediaSessionRepository.adjustOffset(500) }
             PixelButton("+5") { MediaSessionRepository.adjustOffset(5000) }
         }
-        PixelButton("KEEP LYRICS IN NOTIFICATION", startLyricsService, Modifier.fillMaxWidth())
+        PixelButton("KEEP LYRICS IN NOTIFICATION", modifier = Modifier.fillMaxWidth(), onClick = startLyricsService)
     }
 }
 
@@ -204,7 +204,7 @@ private fun SettingsScreen(settings: AppSettings, repo: SettingsRepository, modi
             SettingsSection("BACKGROUND & PRIVACY") {
                 SettingSwitch("Lyrics notification", settings.backgroundLyrics) { scope.launch { repo.setBackgroundLyrics(it) }; if (it) startService() else stopService() }
                 Text("Lock-screen privacy: hide lyric text", fontSize = 13.sp)
-                PixelButton("ENABLE / REPAIR MUSIC ACCESS", openNotificationAccess, Modifier.fillMaxWidth())
+                PixelButton("ENABLE / REPAIR MUSIC ACCESS", modifier = Modifier.fillMaxWidth(), onClick = openNotificationAccess)
             }
         }
         item {
@@ -241,7 +241,7 @@ private fun PixelPanel(modifier: Modifier = Modifier, content: @Composable Colum
 }
 
 @Composable
-private fun PixelButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun PixelButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Button(onClick = onClick, modifier = modifier, shape = RoundedCornerShape(3.dp), border = BorderStroke(2.dp, MaterialTheme.colorScheme.outline), contentPadding = PaddingValues(horizontal = 13.dp, vertical = 9.dp)) {
         Text(text, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black)
     }
