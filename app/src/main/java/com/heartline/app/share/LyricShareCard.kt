@@ -132,7 +132,7 @@ internal object LyricShareCard {
         canvas.drawText("the words follow the music", WIDTH / 2f, 1265f, footerPaint)
 
         val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
+            this.style = Paint.Style.STROKE
             strokeWidth = 3f
             color = Color.argb(45, 255, 255, 255)
         }
