@@ -25,14 +25,38 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
-        debug { applicationIdSuffix = ".debug"; versionNameSuffix = "-debug" }
+
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
     }
 
-    buildFeatures { compose = true; buildConfig = true }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+
     packaging.resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
-    lint { abortOnError = true; warningsAsErrors = false }
+
+    lint {
+        abortOnError = true
+        warningsAsErrors = false
+    }
+}
+
+kotlin {
+    jvmToolchain(17)
 }
 
 dependencies {
