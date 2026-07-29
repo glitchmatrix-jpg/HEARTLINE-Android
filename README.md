@@ -1,37 +1,33 @@
-# HEARTLINE for Android — v1.0.0 source release
+# HEARTLINE for Android — v2.2.0
 
-HEARTLINE detects an active Android media session, retrieves synchronized lyrics, follows playback, stores recent lyrics for offline use, and can keep the current lyric in an ongoing notification.
+HEARTLINE is a private, native Android lyric companion. It detects the active media session, finds synchronized lyrics through LRCLIB, follows playback, stores recent lyrics for offline use, displays a live lyric notification, and creates shareable lyric image cards.
 
-## What is implemented
+## Highlights
 
-- Native Kotlin + Jetpack Compose UI
-- Five HEARTLINE themes
-- Notification-listener permission flow
-- Active `MediaSession` discovery and session scoring
-- Play/pause, previous, next, and seeking through the selected player
-- LRCLIB HTTPS client with timeouts, rate-limit handling, bounded queries, and a descriptive user agent
-- Metadata normalization and candidate scoring
-- Tolerant LRC parser and drift-resistant synchronization
-- Room-backed Offline Vault
-- Configurable retention from 5 to 40 recent songs; default 20
-- Protected favourites, pinned tracks, manual matches, and corrected tracks
-- Per-track and global timing offsets
-- Low-churn ongoing lyric notification
-- DataStore settings
-- HTTPS-only network policy, no microphone permission, no trackers, no ads
-- Unit tests and GitHub Actions APK build
+- Lyric-first Jetpack Compose interface with compact controls and progressive disclosure
+- AUTO mode for real-player control, MANUAL mode for an independent lyric clock, and SEARCH mode for manual lyric matching
+- Active Android media-session discovery and source locking
+- LRCLIB candidate search, alternate-version picker, and saved per-song matches
+- Drift-resistant synchronized lyrics with per-track timing correction
+- Room-backed Offline Vault with configurable retention
+- Favourites and offline-ready lyric storage
+- True light and dark HEARTLINE themes
+- Immersive Focus mode
+- Lyric-first ongoing notification with earlier/reset/later sync actions
+- **Share Lyrics:** select up to five synchronized lines, choose Blush, Midnight, or Cream, generate a 1080×1350 HEARTLINE image, and share through Android’s system share sheet
+- Original HEARTLINE launcher artwork, adaptive icon, round icon, themed monochrome icon, and notification icon
+- HTTPS-only networking, no microphone permission, no trackers, and no ads
 
-## Build
+## Build requirements
 
-1. Install Android Studio with JDK 17 and Android SDK 35.
-2. Open this folder as a project.
-3. Let Gradle sync.
-4. Run the `app` configuration on Android 8.0 or newer.
+- Android Studio or Gradle with JDK 17
+- Android SDK 35
+- Minimum Android version: Android 8.0 / API 26
 
-CLI with a local Gradle installation:
+Run the complete local quality gate:
 
 ```bash
-gradle testDebugUnitTest lintDebug assembleDebug
+gradle testDebugUnitTest lintDebug assembleDebug --stacktrace
 ```
 
 The debug APK is produced at:
@@ -40,47 +36,59 @@ The debug APK is produced at:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
+GitHub Actions runs the same test, lint, and debug-assembly gate and publishes the `HEARTLINE-debug-apk` artifact.
+
 ## First run
 
 1. Open HEARTLINE.
-2. Tap **ENABLE MUSIC ACCESS** and enable HEARTLINE under Notification access.
-3. Play a song in Spotify, YouTube Music, Samsung Music, VLC, or another app that publishes a media session.
-4. Return to HEARTLINE.
-5. Tap **KEEP LYRICS IN NOTIFICATION** to explicitly start background lyric display.
+2. Enable HEARTLINE under Android **Notification access** when prompted.
+3. Play music in an app that exposes a media session, such as Spotify, YouTube Music, Symfonium, Samsung Music, VLC, or Poweramp.
+4. Return to HEARTLINE and allow it to find lyrics.
+5. Open **Choose** to select another lyric version when needed.
+6. Open **Sync** to adjust timing.
+7. Tap **Share** to select lyric lines and create a shareable image.
+8. Enable **Live lyric notification** from More or Settings when desired.
+
+## Share Lyrics privacy model
+
+Share cards are rendered entirely on-device using Android Canvas. The generated PNG is written only to the app’s cache directory and exposed temporarily through a non-exported `FileProvider`. HEARTLINE does not upload the image or selected lyrics to a HEARTLINE server. Old cached share images are cleaned automatically.
 
 ## Security and privacy
 
-- HEARTLINE does **not** request microphone, location, contacts, accounts, or broad file access.
-- Cleartext traffic is disabled at the Android network-security layer.
-- The only remote request in v1 is an HTTPS lyric lookup to LRCLIB.
-- Song history and lyric cache are local Room data.
-- Android cloud backup excludes the listening database and artwork cache.
-- Notification contents default to private on the lock screen.
-- The foreground service begins only after a visible user action.
+- No microphone, location, contacts, accounts, or broad storage permission
+- Cleartext traffic disabled at the Android network-security layer
+- Lyric requests use HTTPS through LRCLIB
+- Listening history and lyric cache remain in the local Room database
+- Share images use app-private cache storage and temporary URI grants
+- No analytics SDK, advertising SDK, or third-party tracker
+- Notification contents use private lock-screen visibility
+- The foreground service starts only after an explicit user action
 
 ## Battery strategy
 
-- Media sessions are callback-driven instead of continuously polling other apps.
-- The lyric clock ticks every 250 ms only while playing and every 1 s while paused.
-- Network lookup occurs once per new fingerprint and then uses Room cache.
-- Notification updates happen on state/line changes, not every timer tick.
-- Artwork is intentionally not downloaded by this first secure core; this avoids storage and network churn until the artwork cache receives its own bounded implementation.
+- Media sessions are callback-driven rather than continuously polling other apps
+- The lyric clock ticks more frequently only while playback is active
+- Network lookup occurs once per new fingerprint before using the local cache
+- Notification updates happen on state or lyric-line changes rather than every timer tick
+- Share-card rendering occurs only when the user taps **Create and share image**
 
-## Honest v1 limitations
+## Project structure
 
-- Android apps that do not expose valid media-session metadata cannot be auto-detected.
-- Some browser/video titles need manual correction; the architecture includes fingerprints and saved mappings, but the full candidate-picker screen is the next hardening increment.
-- Force-stopping the app in Android Settings stops all services by platform design.
-- The foreground service uses Android's `specialUse` type because HEARTLINE displays another app's playback state rather than playing audio itself. Play Store submission requires an accurate foreground-service declaration and policy review.
-- This repository does not include signing secrets. Never commit a production keystore.
+- `media/` — Android media-session detection and transport control
+- `lyrics/` — LRCLIB client, matching, parsing, and synchronization
+- `data/` — Room entities, DAOs, settings, and player state
+- `service/` — foreground live-lyrics notification
+- `share/` — local lyric-card rendering and secure Android sharing
+- `ui/` — Compose interface, sheets, Vault, and settings
 
-## Release gate
+## Release status
 
-Do not call a build production-ready until it passes:
+Version 2.2.0 is the finalized debug-distribution milestone. The automated gate covers compilation, unit tests, lint, and APK assembly. Production publication still requires:
 
-- Spotify, YouTube Music, Samsung Music, VLC, and Chrome testing
-- Samsung and stock-Android background tests
-- process-death and notification-access revocation tests
-- network loss/recovery tests
-- Android 8 through target-SDK device matrix
-- signed release build and dependency/security review
+- signed release build and protected keystore handling
+- physical-device checks across supported Android versions and manufacturers
+- Spotify, YouTube Music, Symfonium, Samsung Music, VLC, Poweramp, and browser media-session checks
+- process-death, permission-revocation, network-loss, and background-service checks
+- Play Store foreground-service declaration and policy review
+
+Never commit a production signing keystore or signing credentials.
