@@ -14,8 +14,8 @@ android {
         applicationId = "com.heartline.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10000
-        versionName = "1.0.0"
+        versionCode = 20000
+        versionName = "2.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
         buildConfigField("String", "LRCLIB_BASE_URL", "\"https://lrclib.net\"")
