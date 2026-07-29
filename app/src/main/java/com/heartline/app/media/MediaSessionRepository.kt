@@ -8,6 +8,8 @@ import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.os.SystemClock
 import com.heartline.app.data.DetectedTrack
+import com.heartline.app.data.LyricCandidate
+import com.heartline.app.data.PlaybackMode
 import com.heartline.app.data.PlayerState
 import com.heartline.app.data.PlayerStatus
 import com.heartline.app.data.SettingsRepository
@@ -21,7 +23,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,8 +38,6 @@ object MediaSessionRepository {
     private lateinit var manager: MediaSessionManager
     private lateinit var lyricsRepository: LyricsRepository
     private lateinit var dao: TrackDao
-    private lateinit var settingsRepository: SettingsRepository
-
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
@@ -49,27 +48,16 @@ object MediaSessionRepository {
     private var lookupJob: Job? = null
     private var tickerJob: Job? = null
     private var preferredPackage: String? = null
+    private var manualBasePositionMs = 0L
+    private var manualBaseElapsedMs = 0L
 
-    fun initialize(
-        app: Context,
-        lyrics: LyricsRepository,
-        trackDao: TrackDao,
-        settings: SettingsRepository
-    ) {
+    fun initialize(app: Context, lyrics: LyricsRepository, trackDao: TrackDao, settings: SettingsRepository) {
         context = app.applicationContext
         manager = context.getSystemService(MediaSessionManager::class.java)
         lyricsRepository = lyrics
         dao = trackDao
-        settingsRepository = settings
-
         val component = ComponentName(context, HeartlineNotificationListener::class.java)
-        runCatching {
-            manager.addOnActiveSessionsChangedListener(
-                { list -> updateControllers(list ?: emptyList()) },
-                component
-            )
-        }
-
+        runCatching { manager.addOnActiveSessionsChangedListener({ updateControllers(it ?: emptyList()) }, component) }
         scope.launch {
             settings.settings.collect { config ->
                 preferredPackage = config.preferredSourcePackage
@@ -83,88 +71,72 @@ object MediaSessionRepository {
     fun refreshSessions() {
         if (!::manager.isInitialized) return
         val component = ComponentName(context, HeartlineNotificationListener::class.java)
-        runCatching { manager.getActiveSessions(component) }
-            .onSuccess(::updateControllers)
-            .onFailure { markPermissionMissing() }
+        runCatching { manager.getActiveSessions(component) }.onSuccess(::updateControllers).onFailure { markPermissionMissing() }
+    }
+
+    fun reconnect() {
+        active = null
+        refreshSessions()
+        scope.launch { delay(150); chooseActive(forceRebind = true) }
     }
 
     fun markPermissionMissing() {
         active = null
-        _state.update {
-            it.copy(
-                status = PlayerStatus.PermissionRequired,
-                message = "Enable music access to detect playback"
-            )
-        }
+        _state.update { it.copy(status = PlayerStatus.PermissionRequired, message = "Enable music access to detect playback") }
     }
 
     private fun updateControllers(list: List<MediaController>) {
         controllers.forEach { runCatching { it.unregisterCallback(callback) } }
         controllers = list.distinctBy { it.sessionToken }
-        controllers.forEach { controller -> runCatching { controller.registerCallback(callback) } }
+        controllers.forEach { runCatching { it.registerCallback(callback) } }
         chooseActive()
     }
 
     private val callback = object : MediaController.Callback() {
         override fun onMetadataChanged(metadata: MediaMetadata?) = chooseActive()
         override fun onPlaybackStateChanged(state: PlaybackState?) = chooseActive()
-        override fun onSessionDestroyed() = refreshSessions()
+        override fun onSessionDestroyed() = reconnect()
     }
 
-    private fun chooseActive() {
-        val lockedPackage = sourceLockPackage
-        val eligible = if (lockedPackage == null) controllers else controllers.filter { it.packageName == lockedPackage }
+    private fun chooseActive(forceRebind: Boolean = false) {
+        val locked = sourceLockPackage
+        val eligible = if (locked == null) controllers else controllers.filter { it.packageName == locked }
         val best = eligible.maxByOrNull { score(it, preferredPackage) }
-
         if (best == null) {
             active = null
-            _state.update {
-                it.copy(
-                    track = null,
-                    lyrics = emptyList(),
-                    plainLyrics = null,
-                    currentLineIndex = -1,
-                    displayPositionMs = 0,
+            _state.update { current ->
+                current.copy(
+                    track = if (current.playbackMode == PlaybackMode.SEARCH) current.track else null,
                     status = PlayerStatus.Waiting,
-                    message = if (lockedPackage == null) {
-                        "Play something and HEARTLINE will find it"
-                    } else {
-                        "Locked source is not currently available"
-                    },
-                    sourceLocked = lockedPackage != null
+                    message = if (locked == null) "Play something and HEARTLINE will find it" else "Locked source is unavailable",
+                    sourceLocked = locked != null
                 )
             }
             return
         }
-
-        // Hysteresis: keep the current valid player unless the challenger is meaningfully better.
-        val current = active?.takeIf { controllers.any { candidate -> candidate.sessionToken == it.sessionToken } }
-        val selected = if (
-            lockedPackage == null && current != null && current.sessionToken != best.sessionToken &&
-            score(best, preferredPackage) < score(current, preferredPackage) + SWITCH_MARGIN
-        ) current else best
-
+        val current = active?.takeIf { controller -> controllers.any { it.sessionToken == controller.sessionToken } }
+        val selected = if (!forceRebind && locked == null && current != null && current.sessionToken != best.sessionToken && score(best, preferredPackage) < score(current, preferredPackage) + SWITCH_MARGIN) current else best
         val detected = toDetectedTrack(selected) ?: return
         val oldFingerprint = _state.value.track?.fingerprint
         active = selected
         _state.update {
             it.copy(
                 track = detected,
-                status = if (oldFingerprint == detected.fingerprint && it.lyrics.isNotEmpty()) it.status else PlayerStatus.Detecting,
-                sourceLocked = lockedPackage != null
+                status = if (oldFingerprint == detected.fingerprint && (it.lyrics.isNotEmpty() || !it.plainLyrics.isNullOrBlank())) it.status else PlayerStatus.Detecting,
+                sourceLocked = locked != null
             )
         }
-        if (detected.fingerprint != oldFingerprint) loadLyrics(detected)
+        if (detected.fingerprint != oldFingerprint && _state.value.playbackMode != PlaybackMode.SEARCH) loadLyrics(detected)
     }
 
     private fun score(controller: MediaController, preference: String?): Int {
         val playback = controller.playbackState
         val metadata = controller.metadata
-        var value = 0
-        when (playback?.state) {
-            PlaybackState.STATE_PLAYING -> value += 100
-            PlaybackState.STATE_BUFFERING, PlaybackState.STATE_CONNECTING -> value += 70
-            PlaybackState.STATE_PAUSED -> value += 25
+        var value = when (playback?.state) {
+            PlaybackState.STATE_PLAYING -> 100
+            PlaybackState.STATE_BUFFERING, PlaybackState.STATE_CONNECTING -> 70
+            PlaybackState.STATE_PAUSED -> 25
+            else -> 0
         }
         if (!metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).isNullOrBlank()) value += 25
         if (!metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST).isNullOrBlank()) value += 20
@@ -190,7 +162,6 @@ object MediaSessionRepository {
             val info = context.packageManager.getApplicationInfo(controller.packageName, 0)
             context.packageManager.getApplicationLabel(info).toString()
         }.getOrDefault(controller.packageName)
-
         return DetectedTrack(
             fingerprint = MetadataNormalizer.fingerprint(title, artist, album, duration),
             title = title,
@@ -209,142 +180,146 @@ object MediaSessionRepository {
 
     private fun loadLyrics(track: DetectedTrack) {
         lookupJob?.cancel()
-        _state.update {
-            it.copy(
-                lyrics = emptyList(),
-                plainLyrics = null,
-                currentLineIndex = -1,
-                isLoadingLyrics = true,
-                status = PlayerStatus.LoadingLyrics,
-                message = "Finding the words…",
-                perTrackOffsetMs = 0,
-                isFavourite = false,
-                isOfflineReady = false
-            )
+        _state.update { it.copy(lyrics = emptyList(), plainLyrics = null, currentLineIndex = -1, isLoadingLyrics = true, status = PlayerStatus.LoadingLyrics, message = "Finding the words…", candidates = emptyList(), candidatesVisible = false) }
+        lookupJob = scope.launch { applyLookup(lyricsRepository.resolve(track), track) }
+    }
+
+    private suspend fun applyLookup(result: LyricsLookup, track: DetectedTrack) {
+        when (result) {
+            is LyricsLookup.Found -> _state.update { it.copy(lyrics = result.lines, plainLyrics = result.entity.plainLyrics, isLoadingLyrics = false, status = PlayerStatus.Ready, message = null, perTrackOffsetMs = result.entity.customOffsetMs, isFavourite = result.entity.isFavourite, isOfflineReady = dao.get(track.fingerprint) != null, selectedProviderId = result.entity.providerId) }
+            is LyricsLookup.Plain -> _state.update { it.copy(lyrics = emptyList(), plainLyrics = result.entity.plainLyrics, isLoadingLyrics = false, status = PlayerStatus.PlainLyrics, message = "Unsynchronized lyrics", perTrackOffsetMs = result.entity.customOffsetMs, isFavourite = result.entity.isFavourite, isOfflineReady = dao.get(track.fingerprint) != null, selectedProviderId = result.entity.providerId) }
+            is LyricsLookup.Instrumental -> _state.update { it.copy(lyrics = emptyList(), plainLyrics = null, isLoadingLyrics = false, status = PlayerStatus.Instrumental, message = "Instrumental — let it breathe", selectedProviderId = result.entity.providerId) }
+            LyricsLookup.OfflineMiss -> _state.update { it.copy(isLoadingLyrics = false, status = PlayerStatus.Offline, message = "No signal, no saved words") }
+            LyricsLookup.NoMatch -> _state.update { it.copy(isLoadingLyrics = false, status = PlayerStatus.NoLyrics, message = "No reliable lyrics match — choose another source") }
+            is LyricsLookup.Error -> _state.update { it.copy(isLoadingLyrics = false, status = PlayerStatus.Error, message = result.message) }
         }
+    }
+
+    fun requestCandidates(query: String? = null) {
+        val track = _state.value.track ?: return
+        lookupJob?.cancel()
+        _state.update { it.copy(isLoadingLyrics = true, candidatesVisible = true, searchQuery = query.orEmpty(), message = "Searching lyric versions…") }
         lookupJob = scope.launch {
-            when (val result = lyricsRepository.resolve(track)) {
-                is LyricsLookup.Found -> _state.update {
-                    it.copy(
-                        lyrics = result.lines,
-                        plainLyrics = result.entity.plainLyrics,
-                        isLoadingLyrics = false,
-                        status = PlayerStatus.Ready,
-                        message = null,
-                        perTrackOffsetMs = result.entity.customOffsetMs,
-                        isFavourite = result.entity.isFavourite,
-                        isOfflineReady = dao.get(track.fingerprint) != null
-                    )
-                }
-                is LyricsLookup.Plain -> _state.update {
-                    it.copy(
-                        plainLyrics = result.entity.plainLyrics,
-                        isLoadingLyrics = false,
-                        status = PlayerStatus.PlainLyrics,
-                        message = "Unsynchronized lyrics",
-                        perTrackOffsetMs = result.entity.customOffsetMs,
-                        isFavourite = result.entity.isFavourite,
-                        isOfflineReady = dao.get(track.fingerprint) != null
-                    )
-                }
-                is LyricsLookup.Instrumental -> _state.update {
-                    it.copy(
-                        isLoadingLyrics = false,
-                        status = PlayerStatus.Instrumental,
-                        message = "Instrumental — let it breathe",
-                        perTrackOffsetMs = result.entity.customOffsetMs,
-                        isFavourite = result.entity.isFavourite,
-                        isOfflineReady = dao.get(track.fingerprint) != null
-                    )
-                }
-                LyricsLookup.OfflineMiss -> _state.update {
-                    it.copy(isLoadingLyrics = false, status = PlayerStatus.Offline, message = "No signal, no saved words")
-                }
-                LyricsLookup.NoMatch -> _state.update {
-                    it.copy(isLoadingLyrics = false, status = PlayerStatus.NoLyrics, message = "Lyrics not found")
-                }
-                is LyricsLookup.Error -> _state.update {
-                    it.copy(isLoadingLyrics = false, status = PlayerStatus.Error, message = result.message)
-                }
-            }
+            runCatching { lyricsRepository.searchCandidates(track, query) }
+                .onSuccess { list -> _state.update { it.copy(isLoadingLyrics = false, candidates = list, candidatesVisible = true, message = if (list.isEmpty()) "No alternate versions found" else null) } }
+                .onFailure { error -> _state.update { it.copy(isLoadingLyrics = false, message = error.message ?: "Could not search lyrics") } }
         }
+    }
+
+    fun selectCandidate(candidate: LyricCandidate) {
+        val track = _state.value.track ?: return
+        lookupJob?.cancel()
+        lookupJob = scope.launch {
+            val result = lyricsRepository.applyCandidate(track, candidate, manuallyMatched = true)
+            applyLookup(result, track)
+            _state.update { it.copy(candidatesVisible = false, candidates = emptyList()) }
+        }
+    }
+
+    fun dismissCandidates() = _state.update { it.copy(candidatesVisible = false) }
+
+    fun setPlaybackMode(mode: PlaybackMode) {
+        val current = _state.value
+        if (mode == current.playbackMode) return
+        if (mode == PlaybackMode.MANUAL) {
+            manualBasePositionMs = current.displayPositionMs
+            manualBaseElapsedMs = SystemClock.elapsedRealtime()
+        }
+        if (mode == PlaybackMode.AUTO) reconnect()
+        _state.update { it.copy(playbackMode = mode, manualClockPlaying = true, message = when (mode) {
+            PlaybackMode.AUTO -> "Following the active player"
+            PlaybackMode.MANUAL -> "Manual lyric clock — music keeps playing"
+            PlaybackMode.SEARCH -> "Search and open any lyrics"
+        }) }
     }
 
     private fun startTicker() {
         tickerJob?.cancel()
         tickerJob = scope.launch {
             while (isActive) {
-                val currentState = _state.value
-                val track = currentState.track
+                val current = _state.value
+                val track = current.track
                 if (track != null) {
-                    val elapsed = if (track.isPlaying) {
-                        (SystemClock.elapsedRealtime() - track.updatedAtElapsedMs).coerceAtLeast(0) * track.playbackSpeed
-                    } else 0f
-                    val rawPosition = track.positionMs + elapsed.toLong()
                     val durationBound = track.durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE
-                    val displayPosition = (rawPosition + currentState.globalOffsetMs + currentState.perTrackOffsetMs)
-                        .coerceIn(0, durationBound)
-                    val index = LrcParser.currentIndex(currentState.lyrics, displayPosition)
-                    _state.update { it.copy(displayPositionMs = displayPosition, currentLineIndex = index) }
+                    val base = when (current.playbackMode) {
+                        PlaybackMode.AUTO -> {
+                            val elapsed = if (track.isPlaying) (SystemClock.elapsedRealtime() - track.updatedAtElapsedMs).coerceAtLeast(0) * track.playbackSpeed else 0f
+                            track.positionMs + elapsed.toLong()
+                        }
+                        PlaybackMode.MANUAL, PlaybackMode.SEARCH -> {
+                            if (current.manualClockPlaying) manualBasePositionMs + (SystemClock.elapsedRealtime() - manualBaseElapsedMs).coerceAtLeast(0) else manualBasePositionMs
+                        }
+                    }
+                    val display = (base + current.globalOffsetMs + current.perTrackOffsetMs).coerceIn(0, durationBound)
+                    val index = LrcParser.currentIndex(current.lyrics, display)
+                    _state.update { it.copy(displayPositionMs = display, currentLineIndex = index) }
                 }
-                delay(if (_state.value.track?.isPlaying == true) 250 else 1_000)
+                delay(if ((_state.value.track?.isPlaying == true && _state.value.playbackMode == PlaybackMode.AUTO) || _state.value.manualClockPlaying) 250 else 1_000)
             }
         }
     }
 
     fun transportPlayPause() {
-        active?.transportControls?.let { controls ->
-            if (_state.value.track?.isPlaying == true) controls.pause() else controls.play()
+        when (_state.value.playbackMode) {
+            PlaybackMode.AUTO -> active?.transportControls?.let { if (_state.value.track?.isPlaying == true) it.pause() else it.play() }
+            PlaybackMode.MANUAL, PlaybackMode.SEARCH -> {
+                val current = _state.value
+                if (current.manualClockPlaying) {
+                    manualBasePositionMs = current.displayPositionMs - current.globalOffsetMs - current.perTrackOffsetMs
+                } else {
+                    manualBaseElapsedMs = SystemClock.elapsedRealtime()
+                }
+                _state.update { it.copy(manualClockPlaying = !current.manualClockPlaying) }
+            }
         }
     }
 
-    fun transportNext() = active?.transportControls?.skipToNext()
-    fun transportPrevious() = active?.transportControls?.skipToPrevious()
-    fun seekTo(ms: Long) = active?.transportControls?.seekTo(ms.coerceAtLeast(0))
+    fun transportNext() { if (_state.value.playbackMode == PlaybackMode.AUTO) active?.transportControls?.skipToNext() }
+    fun transportPrevious() { if (_state.value.playbackMode == PlaybackMode.AUTO) active?.transportControls?.skipToPrevious() }
+
+    fun seekTo(ms: Long) {
+        if (_state.value.playbackMode == PlaybackMode.AUTO) active?.transportControls?.seekTo(ms.coerceAtLeast(0))
+        else {
+            manualBasePositionMs = ms.coerceAtLeast(0) - _state.value.globalOffsetMs - _state.value.perTrackOffsetMs
+            manualBaseElapsedMs = SystemClock.elapsedRealtime()
+            _state.update { it.copy(displayPositionMs = ms.coerceAtLeast(0)) }
+        }
+    }
+
+    fun rejoinPlayerPosition() {
+        setPlaybackMode(PlaybackMode.AUTO)
+        chooseActive(forceRebind = true)
+    }
 
     fun adjustOffset(deltaMs: Long) {
         val track = _state.value.track ?: return
         val newOffset = (_state.value.perTrackOffsetMs + deltaMs).coerceIn(-15_000, 15_000)
         _state.update { it.copy(perTrackOffsetMs = newOffset) }
-        scope.launch {
-            ensureCurrentEntity(track)
-            dao.setOffset(track.fingerprint, newOffset)
-        }
+        scope.launch { ensureCurrentEntity(track); dao.setOffset(track.fingerprint, newOffset) }
     }
 
     fun toggleFavourite() {
         val track = _state.value.track ?: return
         val value = !_state.value.isFavourite
         _state.update { it.copy(isFavourite = value) }
-        scope.launch {
-            ensureCurrentEntity(track)
-            dao.setFavourite(track.fingerprint, value)
-        }
+        scope.launch { ensureCurrentEntity(track); dao.setFavourite(track.fingerprint, value) }
     }
 
     private suspend fun ensureCurrentEntity(track: DetectedTrack) {
         if (dao.get(track.fingerprint) != null) return
-        dao.upsert(
-            TrackEntity(
-                fingerprint = track.fingerprint,
-                title = track.title,
-                artist = track.artist,
-                album = track.album,
-                durationMs = track.durationMs,
-                sourcePackage = track.sourcePackage,
-                sourceLabel = track.sourceLabel,
-                artworkUri = track.artworkUri,
-                syncedLyrics = null,
-                plainLyrics = null,
-                providerId = null,
-                lastPlayedAt = System.currentTimeMillis()
-            )
-        )
+        dao.upsert(TrackEntity(track.fingerprint, track.title, track.artist, track.album, track.durationMs, track.sourcePackage, track.sourceLabel, track.artworkUri, null, null, null, lastPlayedAt = System.currentTimeMillis()))
     }
 
     fun toggleSourceLock() {
-        sourceLockPackage = if (sourceLockPackage == null) active?.packageName else null
-        chooseActive()
+        if (sourceLockPackage == null) {
+            sourceLockPackage = active?.packageName
+            chooseActive(forceRebind = true)
+        } else {
+            sourceLockPackage = null
+            active = null
+            _state.update { it.copy(sourceLocked = false, message = "Reconnecting to the best active player…") }
+            reconnect()
+        }
     }
 
     private const val SWITCH_MARGIN = 35
