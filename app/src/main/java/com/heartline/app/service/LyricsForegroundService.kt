@@ -9,21 +9,26 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import com.heartline.app.HeartlineApplication
 import com.heartline.app.MainActivity
 import com.heartline.app.R
+import com.heartline.app.data.ListenerConnection
 import com.heartline.app.data.PlaybackMode
 import com.heartline.app.media.MediaSessionRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 class LyricsForegroundService : Service() {
@@ -33,32 +38,37 @@ class LyricsForegroundService : Service() {
         const val ACTION_MINUS = "com.heartline.app.MINUS"
         const val ACTION_PLUS = "com.heartline.app.PLUS"
         const val ACTION_RESET = "com.heartline.app.RESET_SYNC"
-        const val CHANNEL_ID = "heartline_live_lyrics_v22"
+        const val ACTION_RECONNECT = "com.heartline.app.RECONNECT"
+        const val CHANNEL_ID = "heartline_live_lyrics_v23"
         const val NOTIFICATION_ID = 2405
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var cachedArtworkUri: String? = null
+    private var cachedArtwork: Bitmap? = null
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
         startForegroundCompat(buildNotification(NotificationModel()))
+        val app = applicationContext as HeartlineApplication
         scope.launch {
-            MediaSessionRepository.state
-                .map { state ->
-                    NotificationModel(
-                        title = state.track?.title ?: "HEARTLINE",
-                        artist = state.track?.artist ?: "Waiting for music…",
-                        currentLyric = state.lyrics.getOrNull(state.currentLineIndex)?.text
-                            ?: state.plainLyrics?.lineSequence()?.firstOrNull().orEmpty()
-                            ?: state.message.orEmpty(),
-                        nextLyric = state.lyrics.getOrNull(state.currentLineIndex + 1)?.text.orEmpty(),
-                        mode = state.playbackMode,
-                        offsetMs = state.perTrackOffsetMs
-                    )
-                }
-                .distinctUntilChanged()
-                .collect(::postNotificationSafely)
+            combine(MediaSessionRepository.state, app.settings.settings) { state, settings ->
+                NotificationModel(
+                    title = state.track?.title ?: "HEARTLINE",
+                    artist = state.track?.artist ?: "Waiting for music…",
+                    currentLyric = state.lyrics.getOrNull(state.currentLineIndex)?.text
+                        ?: state.plainLyrics?.lineSequence()?.firstOrNull().orEmpty()
+                        ?: state.message.orEmpty(),
+                    nextLyric = state.lyrics.getOrNull(state.currentLineIndex + 1)?.text.orEmpty(),
+                    mode = state.playbackMode,
+                    offsetMs = state.perTrackOffsetMs,
+                    connection = state.listenerConnection,
+                    detail = settings.notificationDetail,
+                    privacyMode = settings.privacyMode,
+                    artworkUri = if (settings.showArtwork) state.track?.artworkUri else null
+                )
+            }.distinctUntilChanged().collect(::postNotificationSafely)
         }
     }
 
@@ -84,11 +94,14 @@ class LyricsForegroundService : Service() {
                 val offset = MediaSessionRepository.state.value.perTrackOffsetMs
                 if (offset != 0L) MediaSessionRepository.adjustOffset(-offset)
             }
+            ACTION_RECONNECT -> MediaSessionRepository.reconnect()
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        cachedArtwork?.recycle()
+        cachedArtwork = null
         scope.cancel()
         super.onDestroy()
     }
@@ -112,38 +125,76 @@ class LyricsForegroundService : Service() {
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val lyric = model.currentLyric.ifBlank { "Play a song and HEARTLINE will find the words." }
+        val connected = model.connection == ListenerConnection.CONNECTED
+        val lyric = when (model.detail) {
+            "song_only" -> model.artist
+            else -> model.currentLyric.ifBlank { if (connected) "Play a song and HEARTLINE will find the words." else "Music connection needs attention." }
+        }
         val modeText = model.mode.name.lowercase().replaceFirstChar(Char::uppercase)
         val offsetText = "%+.1fs".format(model.offsetMs / 1000.0)
-        val expandedText = buildString {
-            append(lyric)
-            if (model.nextLyric.isNotBlank()) append("\n\n${model.nextLyric}")
+        val expandedText = when (model.detail) {
+            "song_only" -> model.artist
+            "current" -> lyric
+            else -> buildString {
+                append(lyric)
+                if (model.nextLyric.isNotBlank()) append("\n\n${model.nextLyric}")
+            }
         }
+        val visibility = if (model.privacyMode == "hide_lyrics_locked") NotificationCompat.VISIBILITY_SECRET else NotificationCompat.VISIBILITY_PRIVATE
+        val publicVersion = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_heartline_notification)
+            .setContentTitle(model.title)
+            .setContentText(if (model.privacyMode == "show_lyrics") lyric else model.artist)
+            .build()
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_heartline_notification)
             .setContentTitle(model.title)
             .setContentText(lyric)
-            .setSubText("${model.artist} · $modeText · $offsetText")
+            .setSubText(if (connected) "${model.artist} · $modeText · $offsetText" else "HEARTLINE · Reconnecting")
             .setStyle(
                 NotificationCompat.BigTextStyle()
                     .bigText(expandedText)
                     .setBigContentTitle(model.title)
-                    .setSummaryText("${model.artist} · Lyrics $modeText · Offset $offsetText")
+                    .setSummaryText(if (connected) "${model.artist} · Lyrics $modeText · Offset $offsetText" else "Music connection interrupted")
             )
             .setContentIntent(open)
             .setDeleteIntent(serviceAction(ACTION_STOP, 99))
-            .addAction(R.drawable.ic_sync_earlier, "Earlier", serviceAction(ACTION_MINUS, 2))
-            .addAction(R.drawable.ic_sync_reset, "Reset", serviceAction(ACTION_RESET, 3))
-            .addAction(R.drawable.ic_sync_later, "Later", serviceAction(ACTION_PLUS, 4))
             .setColor(ContextCompat.getColor(this, R.color.ic_launcher_background))
             .setColorized(false)
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setVisibility(visibility)
+            .setPublicVersion(publicVersion)
             .setOnlyAlertOnce(true)
             .setOngoing(true)
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
+
+        if (connected) {
+            builder
+                .addAction(R.drawable.ic_sync_earlier, "Earlier", serviceAction(ACTION_MINUS, 2))
+                .addAction(R.drawable.ic_sync_reset, "Reset", serviceAction(ACTION_RESET, 3))
+                .addAction(R.drawable.ic_sync_later, "Later", serviceAction(ACTION_PLUS, 4))
+        } else {
+            builder.addAction(R.drawable.ic_sync_reset, "Reconnect", serviceAction(ACTION_RECONNECT, 5))
+        }
+        loadArtwork(model.artworkUri)?.let(builder::setLargeIcon)
+        return builder.build()
+    }
+
+    private fun loadArtwork(uriString: String?): Bitmap? {
+        if (uriString.isNullOrBlank()) return null
+        if (uriString == cachedArtworkUri && cachedArtwork != null && cachedArtwork?.isRecycled == false) return cachedArtwork
+        val decoded = runCatching {
+            contentResolver.openInputStream(Uri.parse(uriString))?.use(BitmapFactory::decodeStream)
+        }.getOrNull() ?: return null
+        val max = 256
+        val scale = minOf(1f, max / maxOf(decoded.width, decoded.height).toFloat())
+        val result = if (scale < 1f) Bitmap.createScaledBitmap(decoded, (decoded.width * scale).toInt(), (decoded.height * scale).toInt(), true) else decoded
+        if (result !== decoded) decoded.recycle()
+        cachedArtwork?.takeIf { it !== result }?.recycle()
+        cachedArtworkUri = uriString
+        cachedArtwork = result
+        return result
     }
 
     private fun serviceAction(action: String, requestCode: Int): PendingIntent =
@@ -173,6 +224,10 @@ class LyricsForegroundService : Service() {
         val currentLyric: String = "",
         val nextLyric: String = "",
         val mode: PlaybackMode = PlaybackMode.AUTO,
-        val offsetMs: Long = 0L
+        val offsetMs: Long = 0L,
+        val connection: ListenerConnection = ListenerConnection.UNKNOWN,
+        val detail: String = "current_next",
+        val privacyMode: String = "hide_lyrics_locked",
+        val artworkUri: String? = null
     )
 }
