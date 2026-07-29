@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import com.heartline.app.data.AppSettings
 import com.heartline.app.data.DetectedTrack
+import com.heartline.app.data.LyricCandidate
 import com.heartline.app.data.LyricLine
 import com.heartline.app.data.SettingsRepository
 import com.heartline.app.data.TrackDao
@@ -35,60 +36,81 @@ class LyricsRepository(
             dao.upsert(updated)
             return lookupFromEntity(updated)
         }
+        val candidates = searchCandidates(track, null)
+        val best = candidates.firstOrNull() ?: return if (isNetworkAllowed(settings.settings.first())) LyricsLookup.NoMatch else LyricsLookup.OfflineMiss
+        if (best.score < MIN_AUTOMATIC_SCORE) return LyricsLookup.NoMatch
+        return applyCandidate(track, best, manuallyMatched = false)
+    }
 
+    suspend fun searchCandidates(track: DetectedTrack, queryOverride: String?): List<LyricCandidate> {
         val config = settings.settings.first()
-        if (!isNetworkAllowed(config)) return LyricsLookup.OfflineMiss
-
-        return try {
-            val queries = listOf(
+        if (!isNetworkAllowed(config)) return emptyList()
+        val queries = if (!queryOverride.isNullOrBlank()) {
+            listOf(queryOverride.trim())
+        } else {
+            listOf(
                 "${track.title} ${track.artist} ${track.album.orEmpty()}",
                 "${track.title} ${track.artist}",
                 MetadataNormalizer.clean("${track.title} ${track.artist}")
             ).map(String::trim).filter(String::isNotBlank).distinct()
-
-            val candidates = linkedMapOf<Long, LrclibResult>()
-            for ((index, query) in queries.withIndex()) {
-                if (index > 0) delay(120) // polite pacing; avoids bursty duplicate requests
-                client.search(query).take(20).forEach { candidates[it.id] = it }
-                if (candidates.size >= 10) break
+        }
+        val raw = linkedMapOf<Long, LrclibResult>()
+        for ((index, query) in queries.withIndex()) {
+            if (index > 0) delay(120)
+            client.search(query).take(25).forEach { raw[it.id] = it }
+            if (raw.size >= 20) break
+        }
+        return raw.values
+            .map { item ->
+                LyricCandidate(
+                    id = item.id,
+                    title = item.trackName,
+                    artist = item.artistName,
+                    album = item.albumName,
+                    durationSeconds = item.duration,
+                    synced = !item.syncedLyrics.isNullOrBlank(),
+                    instrumental = item.instrumental,
+                    score = score(track, item),
+                    preview = item.syncedLyrics?.lineSequence()?.firstOrNull { it.isNotBlank() }
+                        ?.replace(Regex("\\[[^]]+\\]"), "")?.trim()
+                        ?: item.plainLyrics?.lineSequence()?.firstOrNull { it.isNotBlank() }.orEmpty(),
+                    syncedLyrics = item.syncedLyrics,
+                    plainLyrics = item.plainLyrics
+                )
             }
+            .sortedByDescending(LyricCandidate::score)
+            .take(15)
+    }
 
-            val ranked = candidates.values
-                .map { it to score(track, it) }
-                .sortedByDescending { it.second }
-            val (best, bestScore) = ranked.firstOrNull() ?: return LyricsLookup.NoMatch
-            if (bestScore < MIN_AUTOMATIC_SCORE) return LyricsLookup.NoMatch
-
-            val entity = TrackEntity(
-                fingerprint = track.fingerprint,
-                title = track.title,
-                artist = track.artist,
-                album = track.album,
-                durationMs = track.durationMs,
-                sourcePackage = track.sourcePackage,
-                sourceLabel = track.sourceLabel,
-                artworkUri = track.artworkUri,
-                syncedLyrics = best.syncedLyrics,
-                plainLyrics = best.plainLyrics,
-                providerId = best.id,
-                lastPlayedAt = System.currentTimeMillis()
-            )
-
-            // Respect the user's cache setting: lyrics still work now, but are not retained.
-            if (config.saveRecentOffline) {
-                dao.upsert(entity)
-                enforceLimit(config)
-            }
-            when {
-                best.instrumental -> LyricsLookup.Instrumental(entity)
-                else -> lookupFromEntity(entity)
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (rateLimited: LyricsRateLimitedException) {
-            LyricsLookup.Error("Lyrics service is busy. HEARTLINE will try again on the next track change.")
-        } catch (error: Exception) {
-            LyricsLookup.Error(error.message?.take(160) ?: "Could not load lyrics")
+    suspend fun applyCandidate(track: DetectedTrack, candidate: LyricCandidate, manuallyMatched: Boolean = true): LyricsLookup {
+        val config = settings.settings.first()
+        val previous = dao.get(track.fingerprint)
+        val entity = TrackEntity(
+            fingerprint = track.fingerprint,
+            title = track.title,
+            artist = track.artist,
+            album = track.album,
+            durationMs = track.durationMs,
+            sourcePackage = track.sourcePackage,
+            sourceLabel = track.sourceLabel,
+            artworkUri = track.artworkUri,
+            syncedLyrics = candidate.syncedLyrics,
+            plainLyrics = candidate.plainLyrics,
+            providerId = candidate.id,
+            customOffsetMs = previous?.customOffsetMs ?: 0,
+            isFavourite = previous?.isFavourite ?: false,
+            keepOffline = previous?.keepOffline ?: false,
+            manuallyMatched = manuallyMatched,
+            lastPlayedAt = System.currentTimeMillis(),
+            createdAt = previous?.createdAt ?: System.currentTimeMillis()
+        )
+        if (config.saveRecentOffline || manuallyMatched) {
+            dao.upsert(entity)
+            enforceLimit(config)
+        }
+        return when {
+            candidate.instrumental -> LyricsLookup.Instrumental(entity)
+            else -> lookupFromEntity(entity)
         }
     }
 
@@ -104,10 +126,8 @@ class LyricsRepository(
     private fun score(track: DetectedTrack, item: LrclibResult): Double {
         val title = MetadataNormalizer.similarity(track.title, item.trackName)
         val artist = MetadataNormalizer.similarity(track.artist, item.artistName)
-        val album = if (track.album.isNullOrBlank() || item.albumName.isNullOrBlank()) 0.5
-        else MetadataNormalizer.similarity(track.album, item.albumName)
-        val duration = if (track.durationMs <= 0 || item.duration == null) 0.5
-        else (1.0 - abs(track.durationMs / 1000.0 - item.duration) / 30.0).coerceIn(0.0, 1.0)
+        val album = if (track.album.isNullOrBlank() || item.albumName.isNullOrBlank()) 0.5 else MetadataNormalizer.similarity(track.album, item.albumName)
+        val duration = if (track.durationMs <= 0 || item.duration == null) 0.5 else (1.0 - abs(track.durationMs / 1000.0 - item.duration) / 30.0).coerceIn(0.0, 1.0)
         val syncedBonus = if (!item.syncedLyrics.isNullOrBlank()) 0.05 else 0.0
         return 0.50 * title + 0.28 * artist + 0.10 * duration + 0.07 * album + syncedBonus
     }
@@ -140,7 +160,5 @@ class LyricsRepository(
         lastPlayedAt = System.currentTimeMillis()
     )
 
-    private companion object {
-        const val MIN_AUTOMATIC_SCORE = 0.62
-    }
+    private companion object { const val MIN_AUTOMATIC_SCORE = 0.62 }
 }
