@@ -13,7 +13,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.heartline.app.service.LyricsForegroundService
-import com.heartline.app.ui.HeartlineV21App
+import com.heartline.app.ui.HeartlineV22App
 
 class MainActivity : ComponentActivity() {
     private val notificationPermission =
@@ -26,7 +26,7 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideNavigationBar()
         setContent {
-            HeartlineV21App(
+            HeartlineV22App(
                 openNotificationAccess = {
                     startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                 },
