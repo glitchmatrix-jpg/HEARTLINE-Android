@@ -17,6 +17,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -26,6 +27,7 @@ import com.heartline.app.HeartlineApplication
 import com.heartline.app.data.AppSettings
 import com.heartline.app.media.MediaSessionRepository
 import com.heartline.app.ui.theme.HeartlineTheme
+import kotlinx.coroutines.launch
 
 enum class V23Tab { NOW, VAULT, SETTINGS }
 enum class V23Sheet { SOURCE, SYNC, MORE, SHARE, DIAGNOSTICS }
@@ -42,6 +44,7 @@ fun HeartlineV23App(
         initialValue = AppSettings("Bubblegum", true, 20, true, true, true, 0, true, "hide_lyrics_locked", true, false, null)
     )
     val state by MediaSessionRepository.state.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
     var tab by remember { mutableStateOf(V23Tab.NOW) }
     var sheet by remember { mutableStateOf<V23Sheet?>(null) }
 
@@ -91,6 +94,14 @@ fun HeartlineV23App(
             null -> Unit
         }
         if (state.candidatesVisible) V23CandidateDialog(state)
+        if (!settings.onboardingComplete) {
+            V23OnboardingDialog(
+                state = state,
+                openNotificationAccess = openNotificationAccess,
+                onTestConnection = { MediaSessionRepository.onAppForegrounded() },
+                onComplete = { scope.launch { app.settings.setOnboardingComplete(true) } }
+            )
+        }
     }
 }
 
