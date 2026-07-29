@@ -15,7 +15,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.heartline.app.media.HeartlineNotificationListener
 import com.heartline.app.media.MediaSessionRepository
 import com.heartline.app.service.LyricsForegroundService
-import com.heartline.app.ui.HeartlineV22App
+import com.heartline.app.ui.v23.HeartlineV23App
 
 class MainActivity : ComponentActivity() {
     private val notificationPermission =
@@ -28,7 +28,7 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideNavigationBar()
         setContent {
-            HeartlineV22App(
+            HeartlineV23App(
                 openNotificationAccess = {
                     startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                 },
@@ -44,12 +44,12 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         HeartlineNotificationListener.requestReconnect(applicationContext)
-        MediaSessionRepository.reconnect()
+        MediaSessionRepository.onAppForegrounded()
     }
 
     override fun onResume() {
         super.onResume()
-        MediaSessionRepository.refreshSessions()
+        MediaSessionRepository.onAppForegrounded()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
