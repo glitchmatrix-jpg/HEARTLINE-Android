@@ -137,7 +137,7 @@ class LyricsForegroundService : Service() {
             .ifBlank { "Play a song and HEARTLINE will find the words." }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.btn_star_big_on)
+            .setSmallIcon(R.drawable.ic_notification_heartline)
             .setContentTitle(model.title)
             .setContentText(model.currentLyric.ifBlank { model.subtitle })
             .setSubText(model.subtitle)
