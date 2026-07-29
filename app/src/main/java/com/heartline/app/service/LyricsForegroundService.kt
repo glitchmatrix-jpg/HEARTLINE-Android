@@ -63,11 +63,16 @@ class LyricsForegroundService : Service() {
                     )
                 }
                 .distinctUntilChanged()
-                .collect { model ->
-                    if (canPostNotifications()) {
-                        runCatching { NotificationManagerCompat.from(this@LyricsForegroundService).notify(NOTIFICATION_ID, buildNotification(model)) }
-                    }
-                }
+                .collect { model -> postNotificationSafely(model) }
+        }
+    }
+
+    private fun postNotificationSafely(model: NotificationModel) {
+        if (!canPostNotifications()) return
+        try {
+            NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification(model))
+        } catch (_: SecurityException) {
+            // Permission may be revoked between the explicit check and notify().
         }
     }
 
