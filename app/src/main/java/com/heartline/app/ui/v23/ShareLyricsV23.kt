@@ -108,8 +108,7 @@ fun V23ShareLyricsSheet(state: PlayerState, defaultBranding: Boolean, onDismiss:
                     FilterChip(
                         selected = themeId == theme.id,
                         onClick = { themeId = theme.id },
-                        label = { Text(theme.name) },
-                        supportingContent = null
+                        label = { Text(theme.name) }
                     )
                 }
             }
