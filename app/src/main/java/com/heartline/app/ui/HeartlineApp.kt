@@ -10,21 +10,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.weight
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -52,10 +38,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -107,12 +93,12 @@ fun HeartlineApp(
                 )
                 Tab.LIBRARY -> LibraryScreen(app.database.trackDao(), Modifier.padding(padding))
                 Tab.SETTINGS -> SettingsScreen(
-                    settings,
-                    app.settings,
-                    Modifier.padding(padding),
-                    openNotificationAccess,
-                    startLyricsService,
-                    stopLyricsService
+                    settings = settings,
+                    repo = app.settings,
+                    modifier = Modifier.padding(padding),
+                    openNotificationAccess = openNotificationAccess,
+                    startService = startLyricsService,
+                    stopService = stopLyricsService
                 )
             }
         }
@@ -172,7 +158,11 @@ private fun PlayerScreen(
                 Text("MUSIC ACCESS NEEDED", style = MaterialTheme.typography.titleMedium)
                 Text("HEARTLINE reads media metadata only. No microphone. No recordings.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(8.dp))
-                PixelButton("ENABLE MUSIC ACCESS", Modifier.fillMaxWidth(), openNotificationAccess)
+                PixelButton(
+                    text = "ENABLE MUSIC ACCESS",
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = openNotificationAccess
+                )
             }
         }
 
@@ -204,7 +194,12 @@ private fun PlayerScreen(
         Timeline(state)
         PlaybackControls(state)
         SyncStrip(state)
-        PixelButton("KEEP LYRICS NEARBY", Modifier.fillMaxWidth(), startLyricsService)
+        PixelButton(
+            text = "KEEP LYRICS NEARBY",
+            modifier = Modifier.fillMaxWidth(),
+            primary = true,
+            onClick = startLyricsService
+        )
     }
 }
 
@@ -326,10 +321,11 @@ private fun PlaybackControls(state: PlayerState) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
         PixelButton("|<", Modifier.weight(1f)) { MediaSessionRepository.transportPrevious() }
         PixelButton(
-            if (state.track?.isPlaying == true) "PAUSE" else "PLAY",
-            Modifier.weight(1.55f),
-            primary = true
-        ) { MediaSessionRepository.transportPlayPause() }
+            text = if (state.track?.isPlaying == true) "PAUSE" else "PLAY",
+            modifier = Modifier.weight(1.55f),
+            primary = true,
+            onClick = { MediaSessionRepository.transportPlayPause() }
+        )
         PixelButton(">|", Modifier.weight(1f)) { MediaSessionRepository.transportNext() }
         PixelButton(if (state.isFavourite) "♥" else "♡", Modifier.weight(1f)) { MediaSessionRepository.toggleFavourite() }
     }
@@ -491,12 +487,20 @@ private fun SettingsScreen(
                     scope.launch { repo.setBackgroundLyrics(it) }
                     if (it) startService() else stopService()
                 }
-                PixelButton("ENABLE / REPAIR MUSIC ACCESS", Modifier.fillMaxWidth(), openNotificationAccess)
+                PixelButton(
+                    text = "ENABLE / REPAIR MUSIC ACCESS",
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = openNotificationAccess
+                )
             }
         }
         item {
             SettingsSection("SECURITY", "Private by design.") {
-                Text("NO MICROPHONE  ·  NO TRACKERS  ·  NO ADS\nHTTPS ONLY  ·  HISTORY STAYS ON-DEVICE", style = MaterialTheme.typography.labelLarge, lineHeight = 22.sp)
+                Text(
+                    "NO MICROPHONE  ·  NO TRACKERS  ·  NO ADS\nHTTPS ONLY  ·  HISTORY STAYS ON-DEVICE",
+                    style = MaterialTheme.typography.labelLarge,
+                    lineHeight = 22.sp
+                )
             }
         }
     }
