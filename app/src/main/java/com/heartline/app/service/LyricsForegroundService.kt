@@ -1,16 +1,19 @@
 package com.heartline.app.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.heartline.app.MainActivity
 import com.heartline.app.R
 import com.heartline.app.media.MediaSessionRepository
@@ -59,9 +62,13 @@ class LyricsForegroundService : Service() {
                 }
                 .distinctUntilChanged()
                 .collect { model ->
-                    runCatching {
-                        NotificationManagerCompat.from(this@LyricsForegroundService)
-                            .notify(NOTIFICATION_ID, buildNotification(model))
+                    if (canPostNotifications()) {
+                        try {
+                            NotificationManagerCompat.from(this@LyricsForegroundService)
+                                .notify(NOTIFICATION_ID, buildNotification(model))
+                        } catch (_: SecurityException) {
+                            // Permission may be revoked between the check and the notify call.
+                        }
                     }
                 }
         }
@@ -90,6 +97,13 @@ class LyricsForegroundService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun canPostNotifications(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
 
     private fun startForegroundCompat(notification: Notification) {
         if (Build.VERSION.SDK_INT >= 34) {
