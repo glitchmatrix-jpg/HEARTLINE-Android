@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -21,7 +22,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -36,7 +36,7 @@ class LyricsForegroundService : Service() {
         const val ACTION_MINUS = "com.heartline.app.MINUS"
         const val ACTION_PLUS = "com.heartline.app.PLUS"
         const val ACTION_FAV = "com.heartline.app.FAV"
-        const val CHANNEL_ID = "heartline_live_lyrics"
+        const val CHANNEL_ID = "heartline_live_lyrics_v2"
         const val NOTIFICATION_ID = 2405
     }
 
@@ -124,24 +124,46 @@ class LyricsForegroundService : Service() {
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        fun serviceAction(action: String, requestCode: Int): PendingIntent = PendingIntent.getService(
-            this,
-            requestCode,
-            Intent(this, LyricsForegroundService::class.java).setAction(action),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
 
-        val fullText = listOf(model.currentLyric, model.nextLyric)
-            .filter(String::isNotBlank)
-            .joinToString("\n")
-            .ifBlank { "Play a song and HEARTLINE will find the words." }
+        val compact = RemoteViews(packageName, R.layout.notification_heartline_compact).apply {
+            setTextViewText(R.id.notification_title, "${model.title}  ·  ${model.subtitle}")
+            setTextViewText(
+                R.id.notification_lyric,
+                model.currentLyric.ifBlank { "Play a song and HEARTLINE will find the words." }
+            )
+            setTextViewText(R.id.notification_play, if (model.isPlaying) "Ⅱ" else "▶")
+            setOnClickPendingIntent(R.id.notification_play, serviceAction(ACTION_PLAY_PAUSE, 3))
+            setOnClickPendingIntent(R.id.notification_mark, open)
+        }
+
+        val expanded = RemoteViews(packageName, R.layout.notification_heartline_expanded).apply {
+            setTextViewText(R.id.notification_title, model.title)
+            setTextViewText(R.id.notification_subtitle, model.subtitle)
+            setTextViewText(
+                R.id.notification_lyric,
+                model.currentLyric.ifBlank { "Play a song and HEARTLINE will find the words." }
+            )
+            setTextViewText(
+                R.id.notification_next_lyric,
+                model.nextLyric.takeIf { it.isNotBlank() }?.let { "next  ·  $it" }.orEmpty()
+            )
+            setTextViewText(R.id.notification_play, if (model.isPlaying) "PAUSE" else "PLAY")
+            setTextViewText(R.id.notification_favourite, if (model.isFavourite) "♥" else "♡")
+            setOnClickPendingIntent(R.id.notification_mark, open)
+            setOnClickPendingIntent(R.id.notification_prev, serviceAction(ACTION_PREV, 2))
+            setOnClickPendingIntent(R.id.notification_play, serviceAction(ACTION_PLAY_PAUSE, 3))
+            setOnClickPendingIntent(R.id.notification_next, serviceAction(ACTION_NEXT, 4))
+            setOnClickPendingIntent(R.id.notification_favourite, serviceAction(ACTION_FAV, 7))
+        }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification_heartline)
+            .setSmallIcon(R.drawable.ic_heartline_notification)
             .setContentTitle(model.title)
             .setContentText(model.currentLyric.ifBlank { model.subtitle })
             .setSubText(model.subtitle)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(fullText))
+            .setCustomContentView(compact)
+            .setCustomBigContentView(expanded)
+            .setStyle(NotificationCompat.DecoratedCustomViewStyle())
             .setContentIntent(open)
             .setDeleteIntent(serviceAction(ACTION_STOP, 99))
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
@@ -149,19 +171,16 @@ class LyricsForegroundService : Service() {
             .setOngoing(true)
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .addAction(android.R.drawable.ic_media_previous, "Previous", serviceAction(ACTION_PREV, 2))
-            .addAction(
-                if (model.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
-                if (model.isPlaying) "Pause" else "Play",
-                serviceAction(ACTION_PLAY_PAUSE, 3)
-            )
-            .addAction(android.R.drawable.ic_media_next, "Next", serviceAction(ACTION_NEXT, 4))
-            .addAction(0, "−0.5s", serviceAction(ACTION_MINUS, 5))
-            .addAction(0, "+0.5s", serviceAction(ACTION_PLUS, 6))
-            .addAction(0, if (model.isFavourite) "Unfavourite" else "Favourite", serviceAction(ACTION_FAV, 7))
-            .addAction(0, "Stop", serviceAction(ACTION_STOP, 8))
             .build()
     }
+
+    private fun serviceAction(action: String, requestCode: Int): PendingIntent =
+        PendingIntent.getService(
+            this,
+            requestCode,
+            Intent(this, LyricsForegroundService::class.java).setAction(action),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
 
     private fun createChannel() {
         val channel = NotificationChannel(
