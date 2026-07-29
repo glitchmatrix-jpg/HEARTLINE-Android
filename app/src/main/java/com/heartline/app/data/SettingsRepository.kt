@@ -34,6 +34,7 @@ class SettingsRepository(private val context: Context) {
         val surroundingLines = intPreferencesKey("surrounding_lines")
         val shareBranding = booleanPreferencesKey("share_branding")
         val notificationDetail = stringPreferencesKey("notification_detail")
+        val onboardingComplete = booleanPreferencesKey("onboarding_complete")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { p ->
@@ -61,7 +62,8 @@ class SettingsRepository(private val context: Context) {
             boldActiveLyric = p[Keys.boldActiveLyric] ?: true,
             surroundingLines = (p[Keys.surroundingLines] ?: 2).coerceIn(1, 3),
             shareBranding = p[Keys.shareBranding] ?: true,
-            notificationDetail = p[Keys.notificationDetail] ?: "current_next"
+            notificationDetail = p[Keys.notificationDetail] ?: "current_next",
+            onboardingComplete = p[Keys.onboardingComplete] ?: false
         )
     }
 
@@ -88,6 +90,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun setSurroundingLines(v: Int) = edit(Keys.surroundingLines, v.coerceIn(1, 3))
     suspend fun setShareBranding(v: Boolean) = edit(Keys.shareBranding, v)
     suspend fun setNotificationDetail(v: String) = edit(Keys.notificationDetail, v)
+    suspend fun setOnboardingComplete(v: Boolean) = edit(Keys.onboardingComplete, v)
 
     suspend fun setPreferredSource(v: String?) {
         context.dataStore.edit { if (v == null) it.remove(Keys.sourcePackage) else it[Keys.sourcePackage] = v }
@@ -122,5 +125,6 @@ data class AppSettings(
     val boldActiveLyric: Boolean = true,
     val surroundingLines: Int = 2,
     val shareBranding: Boolean = true,
-    val notificationDetail: String = "current_next"
+    val notificationDetail: String = "current_next",
+    val onboardingComplete: Boolean = false
 )
