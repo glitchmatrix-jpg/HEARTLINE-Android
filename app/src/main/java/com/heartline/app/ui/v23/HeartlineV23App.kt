@@ -1,6 +1,5 @@
 package com.heartline.app.ui.v23
 
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -21,6 +20,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.heartline.app.HeartlineApplication
 import com.heartline.app.data.AppSettings
@@ -96,7 +96,7 @@ fun HeartlineV23App(
 
 @Composable
 private fun V23Navigation(selected: V23Tab, onSelect: (V23Tab) -> Unit) {
-    NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 3f) {
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
         NavigationBarItem(
             selected = selected == V23Tab.NOW,
             onClick = { onSelect(V23Tab.NOW) },
