@@ -22,18 +22,19 @@ class HeartlineNotificationListener : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         connected.set(true)
-        MediaSessionRepository.refreshSessions()
+        MediaSessionRepository.onListenerConnected()
     }
 
     override fun onListenerDisconnected() {
         connected.set(false)
-        MediaSessionRepository.reconnect()
+        MediaSessionRepository.onListenerDisconnected()
         requestReconnect(applicationContext)
         super.onListenerDisconnected()
     }
 
     override fun onDestroy() {
         connected.set(false)
+        MediaSessionRepository.onListenerDisconnected()
         super.onDestroy()
     }
 }
