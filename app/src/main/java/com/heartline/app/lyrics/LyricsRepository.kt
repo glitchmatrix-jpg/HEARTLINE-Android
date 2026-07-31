@@ -30,16 +30,17 @@ class LyricsRepository(
     private val settings: SettingsRepository,
     private val client: LrclibClient = LrclibClient()
 ) {
-    suspend fun resolve(track: DetectedTrack): LyricsLookup {
+    suspend fun resolve(track: DetectedTrack): LyricsLookup = safelyLookup {
         dao.get(track.fingerprint)?.let { cached ->
             val updated = cached.touch(track)
             dao.upsert(updated)
-            return lookupFromEntity(updated)
+            return@safelyLookup lookupFromEntity(updated)
         }
         val candidates = searchCandidates(track, null)
-        val best = candidates.firstOrNull() ?: return if (isNetworkAllowed(settings.settings.first())) LyricsLookup.NoMatch else LyricsLookup.OfflineMiss
-        if (best.score < MIN_AUTOMATIC_SCORE) return LyricsLookup.NoMatch
-        return applyCandidate(track, best, manuallyMatched = false)
+        val best = candidates.firstOrNull()
+            ?: return@safelyLookup if (isNetworkAllowed(settings.settings.first())) LyricsLookup.NoMatch else LyricsLookup.OfflineMiss
+        if (best.score < MIN_AUTOMATIC_SCORE) return@safelyLookup LyricsLookup.NoMatch
+        applyCandidateInternal(track, best, manuallyMatched = false)
     }
 
     suspend fun searchCandidates(track: DetectedTrack, queryOverride: String?): List<LyricCandidate> {
@@ -82,7 +83,19 @@ class LyricsRepository(
             .take(15)
     }
 
-    suspend fun applyCandidate(track: DetectedTrack, candidate: LyricCandidate, manuallyMatched: Boolean = true): LyricsLookup {
+    suspend fun applyCandidate(
+        track: DetectedTrack,
+        candidate: LyricCandidate,
+        manuallyMatched: Boolean = true
+    ): LyricsLookup = safelyLookup {
+        applyCandidateInternal(track, candidate, manuallyMatched)
+    }
+
+    private suspend fun applyCandidateInternal(
+        track: DetectedTrack,
+        candidate: LyricCandidate,
+        manuallyMatched: Boolean
+    ): LyricsLookup {
         val config = settings.settings.first()
         val previous = dao.get(track.fingerprint)
         val entity = TrackEntity(
@@ -112,6 +125,23 @@ class LyricsRepository(
             candidate.instrumental -> LyricsLookup.Instrumental(entity)
             else -> lookupFromEntity(entity)
         }
+    }
+
+    private suspend fun safelyLookup(block: suspend () -> LyricsLookup): LyricsLookup = try {
+        block()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Throwable) {
+        LyricsLookup.Error(error.toUserMessage())
+    }
+
+    private fun Throwable.toUserMessage(): String = when (this) {
+        is LyricsRateLimitedException -> message ?: "Lyrics provider rate limit reached"
+        is LyricsNetworkException -> message ?: "Could not reach the lyrics provider"
+        is java.net.SocketTimeoutException -> "Lyrics lookup timed out — try again"
+        is java.net.UnknownHostException -> "No network connection for lyrics"
+        is kotlinx.serialization.SerializationException -> "The lyrics provider returned an unreadable response"
+        else -> "Lyrics could not be loaded for this song"
     }
 
     private fun lookupFromEntity(entity: TrackEntity): LyricsLookup {
