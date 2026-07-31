@@ -32,19 +32,18 @@ class LrclibClient {
         return request("/api/search?q=${Uri.encode(safeQuery)}")
     }
 
+    /**
+     * Performs a structured search through LRCLIB's broadly supported q endpoint.
+     * Some LRCLIB deployments reject track_name/artist_name/album_name parameters
+     * with HTTP 403, so these fields are combined into one bounded query instead.
+     */
     suspend fun searchFields(track: String, artist: String?, album: String?): List<LrclibResult> {
-        val safeTrack = track.trim().take(180)
-        if (safeTrack.isBlank()) return emptyList()
-        val path = buildString {
-            append("/api/search?track_name=").append(Uri.encode(safeTrack))
-            artist?.trim()?.takeIf(String::isNotBlank)?.take(160)?.let {
-                append("&artist_name=").append(Uri.encode(it))
-            }
-            album?.trim()?.takeIf(String::isNotBlank)?.take(180)?.let {
-                append("&album_name=").append(Uri.encode(it))
-            }
-        }
-        return request(path)
+        val query = buildList {
+            track.trim().takeIf(String::isNotBlank)?.let { add(it) }
+            artist?.trim()?.takeIf(String::isNotBlank)?.let { add(it) }
+            album?.trim()?.takeIf(String::isNotBlank)?.let { add(it) }
+        }.joinToString(" ").take(220)
+        return search(query)
     }
 
     private suspend fun request(path: String): List<LrclibResult> = withContext(Dispatchers.IO) {
