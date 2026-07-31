@@ -1,0 +1,15 @@
+HEARTLINE recovery QA
+
+Base: known-working pre-lyrics-experiment build.
+Included changes only:
+- fast media switching
+- pinned Share Lyrics actions
+- uncached/new-song lookup crash boundary
+- notification listener lifecycle hardening
+
+Excluded:
+- all robust matching experiments
+- parallel LRCLIB requests
+- fielded LRCLIB requests
+- changed LRCLIB headers
+- fallback transport changes
