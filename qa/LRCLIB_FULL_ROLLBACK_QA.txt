@@ -1,0 +1,11 @@
+HEARTLINE LRCLIB full rollback QA
+
+This branch is intentionally identical to main except for this marker.
+
+Scope:
+- restore the exact last known-working LRCLIB HTTP client
+- restore the exact last known-working sequential search algorithm
+- retain only the independent crash guards added earlier
+- no parallel requests
+- no new fielded request transport
+- no experimental fallback transport
