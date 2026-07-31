@@ -1,0 +1,8 @@
+HEARTLINE LRCLIB safe rollback QA
+
+Scope:
+- One LRCLIB request on normal successful lookups
+- Sequential 250 ms fallback only after a true no-result response
+- Valid project-identifying User-Agent and Lrclib-Client headers
+- No parallel LRCLIB traffic
+- Existing crash guards retained
