@@ -11,8 +11,7 @@ import com.heartline.app.data.SettingsRepository
 import com.heartline.app.data.TrackDao
 import com.heartline.app.data.TrackEntity
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlin.math.abs
 
@@ -80,42 +79,32 @@ class LyricsRepository(
             .take(15)
     }
 
-    private suspend fun searchRobust(track: DetectedTrack): LinkedHashMap<Long, LrclibResult> = coroutineScope {
+    private suspend fun searchRobust(track: DetectedTrack): LinkedHashMap<Long, LrclibResult> {
         val titles = MetadataNormalizer.titleVariants(track.title)
         val artists = MetadataNormalizer.artistVariants(track.artist)
         val albums = MetadataNormalizer.albumVariants(track.album)
 
-        // The old implementation performed three requests sequentially with artificial waits.
-        // These two bounded searches run together, so broader matching does not make detection slower.
-        val precise = async {
-            client.searchFields(
-                track = titles.first(),
-                artist = artists.firstOrNull(),
-                album = albums.firstOrNull()
-            )
-        }
-        val tolerant = async {
-            client.searchFields(
-                track = titles.getOrElse(1) { titles.first() },
-                artist = artists.getOrElse(1) { artists.firstOrNull().orEmpty() }.ifBlank { null },
-                album = null
-            )
-        }
+        val primaryQuery = listOf(
+            titles.firstOrNull().orEmpty(),
+            artists.firstOrNull().orEmpty(),
+            albums.firstOrNull().orEmpty()
+        ).filter(String::isNotBlank).joinToString(" ")
 
-        linkedMapOf<Long, LrclibResult>().apply {
-            precise.await().forEach { put(it.id, it) }
-            tolerant.await().forEach { put(it.id, it) }
+        val raw = linkedMapOf<Long, LrclibResult>()
+        client.search(primaryQuery).forEach { raw[it.id] = it }
+        if (raw.isNotEmpty()) return raw
 
-            // Only use one extra broad request when the bounded fielded searches found nothing.
-            // This preserves normal lookup speed while rescuing unusual metadata on new releases.
-            if (isEmpty()) {
-                val broad = listOf(
-                    titles.lastOrNull().orEmpty(),
-                    artists.lastOrNull().orEmpty()
-                ).filter(String::isNotBlank).joinToString(" ")
-                client.search(broad).forEach { put(it.id, it) }
-            }
+        // Only slower/fuzzier searches happen after the normal request found nothing.
+        // This keeps successful lookups at one request while still rescuing new or oddly tagged releases.
+        delay(250)
+        val fallbackQuery = listOf(
+            titles.lastOrNull().orEmpty(),
+            artists.lastOrNull().orEmpty()
+        ).filter(String::isNotBlank).joinToString(" ")
+        if (fallbackQuery.isNotBlank() && fallbackQuery != primaryQuery) {
+            client.search(fallbackQuery).forEach { raw[it.id] = it }
         }
+        return raw
     }
 
     suspend fun applyCandidate(
