@@ -32,36 +32,25 @@ class LrclibClient {
         return request("/api/search?q=${Uri.encode(safeQuery)}")
     }
 
-    /**
-     * Performs a structured search through LRCLIB's broadly supported q endpoint.
-     * Some LRCLIB deployments reject track_name/artist_name/album_name parameters
-     * with HTTP 403, so these fields are combined into one bounded query instead.
-     */
-    suspend fun searchFields(track: String, artist: String?, album: String?): List<LrclibResult> {
-        val query = buildList {
-            track.trim().takeIf(String::isNotBlank)?.let { add(it) }
-            artist?.trim()?.takeIf(String::isNotBlank)?.let { add(it) }
-            album?.trim()?.takeIf(String::isNotBlank)?.let { add(it) }
-        }.joinToString(" ").take(220)
-        return search(query)
-    }
-
     private suspend fun request(path: String): List<LrclibResult> = withContext(Dispatchers.IO) {
         val url = URL("${BuildConfig.LRCLIB_BASE_URL}$path")
         require(url.protocol == "https") { "Lyrics requests must use HTTPS" }
 
+        val clientIdentity = "HEARTLINE-Android/${BuildConfig.VERSION_NAME} (https://github.com/glitchmatrix-jpg/HEARTLINE-Android)"
         val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 8_000
             readTimeout = 10_000
             useCaches = false
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "HEARTLINE-Android/${BuildConfig.VERSION_NAME} (contact: local-app)")
+            setRequestProperty("User-Agent", clientIdentity)
+            setRequestProperty("Lrclib-Client", clientIdentity)
             instanceFollowRedirects = false
         }
         try {
             val status = connection.responseCode
             if (status == 429) throw LyricsRateLimitedException()
+            if (status == 403) throw LyricsNetworkException("Lyrics service temporarily blocked this client — wait a little and try again")
             if (status !in 200..299) throw LyricsNetworkException("Lyrics service returned HTTP $status")
 
             val declaredLength = connection.contentLengthLong
