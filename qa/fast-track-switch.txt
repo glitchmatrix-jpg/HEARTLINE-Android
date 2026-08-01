@@ -1,0 +1,1 @@
+CI trigger for the isolated fast media-switch detection patch.
