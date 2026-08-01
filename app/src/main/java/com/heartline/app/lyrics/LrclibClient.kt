@@ -26,11 +26,29 @@ data class LrclibResult(
 class LrclibClient {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
-    suspend fun search(query: String): List<LrclibResult> = withContext(Dispatchers.IO) {
+    suspend fun search(query: String): List<LrclibResult> {
         val safeQuery = query.trim().take(220)
-        if (safeQuery.isBlank()) return@withContext emptyList()
+        if (safeQuery.isBlank()) return emptyList()
+        return request("/api/search?q=${Uri.encode(safeQuery)}")
+    }
 
-        val url = URL("${BuildConfig.LRCLIB_BASE_URL}/api/search?q=${Uri.encode(safeQuery)}")
+    suspend fun searchFields(track: String, artist: String?, album: String?): List<LrclibResult> {
+        val safeTrack = track.trim().take(180)
+        if (safeTrack.isBlank()) return emptyList()
+        val path = buildString {
+            append("/api/search?track_name=").append(Uri.encode(safeTrack))
+            artist?.trim()?.takeIf(String::isNotBlank)?.take(160)?.let {
+                append("&artist_name=").append(Uri.encode(it))
+            }
+            album?.trim()?.takeIf(String::isNotBlank)?.take(180)?.let {
+                append("&album_name=").append(Uri.encode(it))
+            }
+        }
+        return request(path)
+    }
+
+    private suspend fun request(path: String): List<LrclibResult> = withContext(Dispatchers.IO) {
+        val url = URL("${BuildConfig.LRCLIB_BASE_URL}$path")
         require(url.protocol == "https") { "Lyrics requests must use HTTPS" }
 
         val connection = (url.openConnection() as HttpURLConnection).apply {
