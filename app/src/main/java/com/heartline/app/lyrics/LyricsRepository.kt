@@ -11,7 +11,8 @@ import com.heartline.app.data.SettingsRepository
 import com.heartline.app.data.TrackDao
 import com.heartline.app.data.TrackEntity
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlin.math.abs
 
@@ -46,21 +47,13 @@ class LyricsRepository(
     suspend fun searchCandidates(track: DetectedTrack, queryOverride: String?): List<LyricCandidate> {
         val config = settings.settings.first()
         if (!isNetworkAllowed(config)) return emptyList()
-        val queries = if (!queryOverride.isNullOrBlank()) {
-            listOf(queryOverride.trim())
+
+        val raw = if (!queryOverride.isNullOrBlank()) {
+            client.search(queryOverride.trim()).associateByTo(linkedMapOf(), LrclibResult::id)
         } else {
-            listOf(
-                "${track.title} ${track.artist} ${track.album.orEmpty()}",
-                "${track.title} ${track.artist}",
-                MetadataNormalizer.clean("${track.title} ${track.artist}")
-            ).map(String::trim).filter(String::isNotBlank).distinct()
+            searchRobust(track)
         }
-        val raw = linkedMapOf<Long, LrclibResult>()
-        for ((index, query) in queries.withIndex()) {
-            if (index > 0) delay(120)
-            client.search(query).take(25).forEach { raw[it.id] = it }
-            if (raw.size >= 20) break
-        }
+
         return raw.values
             .map { item ->
                 LyricCandidate(
@@ -79,8 +72,50 @@ class LyricsRepository(
                     plainLyrics = item.plainLyrics
                 )
             }
-            .sortedByDescending(LyricCandidate::score)
+            .sortedWith(
+                compareByDescending<LyricCandidate> { it.score }
+                    .thenByDescending { it.synced }
+                    .thenBy { durationDifference(track, it.durationSeconds) }
+            )
             .take(15)
+    }
+
+    private suspend fun searchRobust(track: DetectedTrack): LinkedHashMap<Long, LrclibResult> = coroutineScope {
+        val titles = MetadataNormalizer.titleVariants(track.title)
+        val artists = MetadataNormalizer.artistVariants(track.artist)
+        val albums = MetadataNormalizer.albumVariants(track.album)
+
+        // The old implementation performed three requests sequentially with artificial waits.
+        // These two bounded searches run together, so broader matching does not make detection slower.
+        val precise = async {
+            client.searchFields(
+                track = titles.first(),
+                artist = artists.firstOrNull(),
+                album = albums.firstOrNull()
+            )
+        }
+        val tolerant = async {
+            client.searchFields(
+                track = titles.getOrElse(1) { titles.first() },
+                artist = artists.getOrElse(1) { artists.firstOrNull().orEmpty() }.ifBlank { null },
+                album = null
+            )
+        }
+
+        linkedMapOf<Long, LrclibResult>().apply {
+            precise.await().forEach { put(it.id, it) }
+            tolerant.await().forEach { put(it.id, it) }
+
+            // Only use one extra broad request when the bounded fielded searches found nothing.
+            // This preserves normal lookup speed while rescuing unusual metadata on new releases.
+            if (isEmpty()) {
+                val broad = listOf(
+                    titles.lastOrNull().orEmpty(),
+                    artists.lastOrNull().orEmpty()
+                ).filter(String::isNotBlank).joinToString(" ")
+                client.search(broad).forEach { put(it.id, it) }
+            }
+        }
     }
 
     suspend fun applyCandidate(
@@ -154,13 +189,31 @@ class LyricsRepository(
     }
 
     private fun score(track: DetectedTrack, item: LrclibResult): Double {
-        val title = MetadataNormalizer.similarity(track.title, item.trackName)
-        val artist = MetadataNormalizer.similarity(track.artist, item.artistName)
-        val album = if (track.album.isNullOrBlank() || item.albumName.isNullOrBlank()) 0.5 else MetadataNormalizer.similarity(track.album, item.albumName)
-        val duration = if (track.durationMs <= 0 || item.duration == null) 0.5 else (1.0 - abs(track.durationMs / 1000.0 - item.duration) / 30.0).coerceIn(0.0, 1.0)
-        val syncedBonus = if (!item.syncedLyrics.isNullOrBlank()) 0.05 else 0.0
-        return 0.50 * title + 0.28 * artist + 0.10 * duration + 0.07 * album + syncedBonus
+        val title = MetadataNormalizer.titleVariants(track.title)
+            .maxOf { MetadataNormalizer.similarity(it, item.trackName) }
+        val artist = MetadataNormalizer.artistVariants(track.artist)
+            .maxOf { MetadataNormalizer.similarity(it, item.artistName) }
+        val album = if (track.album.isNullOrBlank() || item.albumName.isNullOrBlank()) {
+            0.5
+        } else {
+            MetadataNormalizer.albumVariants(track.album)
+                .maxOfOrNull { MetadataNormalizer.similarity(it, item.albumName.orEmpty()) } ?: 0.5
+        }
+        val duration = if (track.durationMs <= 0 || item.duration == null) {
+            0.5
+        } else {
+            (1.0 - abs(track.durationMs / 1000.0 - item.duration) / 24.0).coerceIn(0.0, 1.0)
+        }
+        val syncedBonus = if (!item.syncedLyrics.isNullOrBlank()) 0.06 else 0.0
+        val plainBonus = if (item.syncedLyrics.isNullOrBlank() && !item.plainLyrics.isNullOrBlank()) 0.025 else 0.0
+        val suspiciousDurationPenalty = if (track.durationMs > 0 && item.duration != null && abs(track.durationMs / 1000.0 - item.duration) > 45) 0.12 else 0.0
+        return (0.52 * title + 0.27 * artist + 0.10 * duration + 0.06 * album + syncedBonus + plainBonus - suspiciousDurationPenalty)
+            .coerceIn(0.0, 1.0)
     }
+
+    private fun durationDifference(track: DetectedTrack, candidateSeconds: Double?): Double =
+        if (track.durationMs <= 0 || candidateSeconds == null) Double.MAX_VALUE
+        else abs(track.durationMs / 1000.0 - candidateSeconds)
 
     private suspend fun enforceLimit(config: AppSettings) {
         var count = dao.offlineCount()
@@ -190,5 +243,5 @@ class LyricsRepository(
         lastPlayedAt = System.currentTimeMillis()
     )
 
-    private companion object { const val MIN_AUTOMATIC_SCORE = 0.62 }
+    private companion object { const val MIN_AUTOMATIC_SCORE = 0.60 }
 }

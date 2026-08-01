@@ -1,0 +1,1 @@
+QA trigger for LRCLIB HTTP 403 hotfix. Verifies supported q-endpoint transport with the robust matching and scoring pipeline unchanged.
