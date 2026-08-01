@@ -26,25 +26,31 @@ data class LrclibResult(
 class LrclibClient {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
-    suspend fun search(query: String): List<LrclibResult> = withContext(Dispatchers.IO) {
+    suspend fun search(query: String): List<LrclibResult> {
         val safeQuery = query.trim().take(220)
-        if (safeQuery.isBlank()) return@withContext emptyList()
+        if (safeQuery.isBlank()) return emptyList()
+        return request("/api/search?q=${Uri.encode(safeQuery)}")
+    }
 
-        val url = URL("${BuildConfig.LRCLIB_BASE_URL}/api/search?q=${Uri.encode(safeQuery)}")
+    private suspend fun request(path: String): List<LrclibResult> = withContext(Dispatchers.IO) {
+        val url = URL("${BuildConfig.LRCLIB_BASE_URL}$path")
         require(url.protocol == "https") { "Lyrics requests must use HTTPS" }
 
+        val clientIdentity = "HEARTLINE-Android/${BuildConfig.VERSION_NAME} (https://github.com/glitchmatrix-jpg/HEARTLINE-Android)"
         val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 8_000
             readTimeout = 10_000
             useCaches = false
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "HEARTLINE-Android/${BuildConfig.VERSION_NAME} (contact: local-app)")
+            setRequestProperty("User-Agent", clientIdentity)
+            setRequestProperty("Lrclib-Client", clientIdentity)
             instanceFollowRedirects = false
         }
         try {
             val status = connection.responseCode
             if (status == 429) throw LyricsRateLimitedException()
+            if (status == 403) throw LyricsNetworkException("Lyrics service temporarily blocked this client — wait a little and try again")
             if (status !in 200..299) throw LyricsNetworkException("Lyrics service returned HTTP $status")
 
             val declaredLength = connection.contentLengthLong
